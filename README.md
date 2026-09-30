@@ -4,9 +4,13 @@
 
 ## Що робить
 
-Голосовий асистент: wake word → OpenAI Realtime API → локальний **Agent Router** →
-**Google Calendar / Gmail** через OAuth Desktop flow. n8n і зовнішній `agent-ecosystem`
-**не потрібні** для календаря та пошти.
+Голосовий асистент: wake word → **voice engine** (`VOICE_ENGINE=realtime` або `live`) →
+локальний **Agent Router** → **Google Calendar / Gmail** через OAuth Desktop flow.
+n8n і зовнішній `agent-ecosystem` **не потрібні**.
+
+- **realtime** (за замовчуванням): legacy OpenAI Realtime — Calendar + Gmail як раніше.
+- **live**: GPT-Live (`gpt-live-1`) + Responses delegation — Calendar structured tools;
+  Gmail у Live **навмисно не мігровано** (залишається на Realtime).
 
 Користувач входить своїм Google-акаунтом у системному браузері. Один Google Cloud Project
 належить розробнику застосунку; кінцевий користувач не створює workflow і не вводить API-ключі.
@@ -55,12 +59,18 @@ credentials/client_secret.json
 ### 3. Запуск асистента
 
 ```bash
+# Legacy Realtime (default) — Calendar + Gmail
 uv run python main.py
+
+# GPT-Live + Calendar (Gmail not on this path yet)
+# set VOICE_ENGINE=live in .env, or:
+# Windows PowerShell:
+$env:VOICE_ENGINE="live"; uv run python main.py
 ```
 
 Скажіть «привіт», потім «підключи Google» — відкриється браузер, оберіть акаунт і
-надайте дозволи (спершу Calendar; Gmail — при першому використанні пошти або
-`google_account` з `with_gmail=true`).
+надайте дозволи (спершу Calendar; Gmail — при першому використанні пошти в Realtime
+або `google_account` з `with_gmail=true`).
 
 Refresh tokens зберігаються в **OS keyring** (не в спільному `token.json`).
 
@@ -69,6 +79,11 @@ Refresh tokens зберігаються в **OS keyring** (не в спільн�
 | Змінна | Навіщо |
 |---|---|
 | `OPENAI_API_KEY` | обов'язково |
+| `VOICE_ENGINE` | `realtime` (default) або `live` |
+| `OPENAI_LIVE_MODEL` | default `gpt-live-1` |
+| `OPENAI_LIVE_BACKEND_MODEL` | Responses backend (default `gpt-6-luna`) |
+| `OPENAI_LIVE_VOICE` | Live TTS voice (default `marin`) |
+| `OPENAI_LIVE_AUDIO_RATE` | default `24000` |
 | `GOOGLE_OAUTH_CLIENT_SECRETS_FILE` | шлях до Desktop client JSON |
 | `GOOGLE_ACCOUNT_STATE_FILE` | активний `sub` + display profiles (без секретів) |
 | `GOOGLE_CALENDAR_TIMEZONE` | дефолт `Europe/Kyiv` |

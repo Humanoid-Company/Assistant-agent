@@ -4,7 +4,7 @@ version = "3.2.1"
 description = "Voice assistant with direct Google Calendar/Gmail APIs (no n8n)"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "openai[realtime]>=2.0.0",
+    "openai[realtime]>=3.12.0",
     "SpeechRecognition>=3.10.0",
     "sounddevice>=0.4.6",
     "pygame-ce>=2.5.0",

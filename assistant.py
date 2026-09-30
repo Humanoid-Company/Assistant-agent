@@ -4,9 +4,8 @@ Main assistant state machine.
 States
 ------
 SLEEPING – Idle; only listens for the wake phrase (cheap Google STT).
-AWAKE    – One persistent Realtime API session handles the whole live
-           conversation: it hears the user directly, decides when to speak,
-           and calls tools for voice/memory commands.
+AWAKE    – One persistent voice session (Realtime legacy OR GPT-Live)
+           handles conversation. Engine selected via VOICE_ENGINE.
 
 Conversation memory
 --------------------
@@ -14,7 +13,7 @@ Turns are carried over in-memory between sleep/wake cycles within the same
 process run — say goodbye and "привіт" again and the assistant still
 remembers. Restarting the script clears it (nothing is persisted to disk).
 
-Voice commands (handled as Realtime API tool calls, not regex)
+Voice commands (handled as tool calls, not regex)
 ----------------------------------------------------------------
 "тебе звати …"             – change the assistant's own name
 "до побачення" / "бувай" / … — model calls end_conversation to go back to sleep
@@ -37,6 +36,7 @@ from config import (
     GOOGLE_ACCOUNT_STATE_FILE,
     GOOGLE_CALENDAR_TIMEZONE,
     GOOGLE_OAUTH_CLIENT_SECRETS_FILE,
+    OPENAI_LIVE_VOICE,
     REALTIME_VOICE,
     ROBOT_BACKEND,
     ROBOT_NETWORK_INTERFACE,
@@ -44,12 +44,22 @@ from config import (
     ROUTER_TASK_CATEGORIES,
     SYSTEM_PROMPT,
     TRIGGER_PHRASES,
+    VOICE_ENGINE,
 )
+from prompts.backend_prompt import build_backend_prompt
+from prompts.live_prompt import build_live_prompt
 from realtime_client import RealtimeConversation
 from robot_control import ROBOT_ACTIONS, create_robot_controller
 from router.factory import build_agent_router
 from speech_to_text import SpeechToText
 from text_to_speech import TextToSpeech
+from tools.calendar_tools import CalendarToolWrappers
+from tools.executor import ToolExecutionContext, ToolExecutor
+from tools.results import ToolResult, agent_result_to_tool_result
+from tools.task_context import TaskRevisionTracker
+from voice.factory import normalize_voice_engine
+from voice.live_session import LiveVoiceSession
+from voice.mic import LiveMicCapture
 
 _MEMORY_FILE = Path(__file__).parent / "assistant_memory.json"
 
@@ -550,20 +560,19 @@ class State(Enum):
 
 
 class Assistant:
-    """Voice assistant state machine."""
+    """Voice assistant state machine — orchestration/lifecycle only."""
 
     def __init__(self) -> None:
         self.stt = SpeechToText()
         self.tts = TextToSpeech()
         self.rt: RealtimeConversation | None = None
+        self._live: LiveVoiceSession | None = None
         self.state = State.SLEEPING
         self._running = False
         self._sleep_requested = False
-        # Set by change_voice — a Realtime session can't hot-swap its voice
-        # mid-connection, so the only way to apply a new one is to end this
-        # process and have the user rerun main.py (config.py/assistant_memory.json
-        # get re-read from scratch on the next launch).
+        # Realtime: process restart required. Live: session restart only.
         self._voice_change_pending = False
+        self._voice_engine = normalize_voice_engine(VOICE_ENGINE)
 
         # Conversation history for the current run only — carries over between
         # sleep/wake cycles (in-memory), but resets when the process restarts.
@@ -576,22 +585,36 @@ class Assistant:
         # ROBOT_BACKEND is switched over in .env.
         self.robot = create_robot_controller(ROBOT_BACKEND, ROBOT_NETWORK_INTERFACE)
 
-        # Local Google Agent Router (Calendar + Gmail) — no n8n / agent-ecosystem.
+        # Local Google Agent Router (Calendar + Gmail) — Gmail stays on Realtime only.
         self.router = build_agent_router(
             client_secrets_file=GOOGLE_OAUTH_CLIENT_SECRETS_FILE,
             state_file=GOOGLE_ACCOUNT_STATE_FILE,
             timezone=GOOGLE_CALENDAR_TIMEZONE,
         )
+        self._task_revisions = TaskRevisionTracker()
+        self._tool_executor = self._build_tool_executor()
 
         # Proactive connectivity monitoring — alerts only on real API/network errors,
         # not on "Google not connected yet" (that is expected before first login).
         self._connectivity_watcher = _ConnectivityWatcher()
 
+    def _build_tool_executor(self) -> ToolExecutor:
+        calendar = CalendarToolWrappers(self.router.calendar_action)
+        executor = ToolExecutor(calendar=calendar, revisions=self._task_revisions)
+        executor.register("set_assistant_name", self._live_set_name)
+        executor.register("change_voice", self._live_change_voice)
+        executor.register("change_language", self._live_change_language)
+        executor.register("end_conversation", self._live_end_conversation)
+        executor.register("check_connection", self._live_check_connection)
+        executor.register("control_robot", self._live_control_robot)
+        executor.register("google_account", self._live_google_account)
+        return executor
+
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def run(self) -> None:
         self._running = True
-        logger.info("Assistant started.")
+        logger.info("Assistant started. voice_engine=%s", self._voice_engine)
         # Unambiguous startup marker — if this line is missing from the console
         # on launch, the running process is NOT this code (stale process from
         # before robot_control.py existed, wrong directory, etc.).
@@ -619,6 +642,8 @@ class Assistant:
         self._running = False
         if self.rt is not None:
             self.rt.close()
+        if self._live is not None:
+            self._live.close()
 
     # ── State handlers ────────────────────────────────────────────────────────
 
@@ -629,8 +654,13 @@ class Assistant:
             self.state = State.AWAKE
 
     def _run_awake_session(self) -> None:
-        """Runs one full awake period on a single Realtime API session, from
-        the wake greeting until the model calls end_conversation."""
+        if self._voice_engine == "live":
+            self._run_awake_session_live()
+        else:
+            self._run_awake_session_realtime()
+
+    def _run_awake_session_realtime(self) -> None:
+        """Legacy Realtime path — preserved with existing workarounds."""
         self._sleep_requested = False
         self._voice_change_pending = False
         # Where in this session's turns the goodbye exchange starts — trimmed
@@ -641,9 +671,7 @@ class Assistant:
         self._history_cutoff: int | None = None
         self._pending_cutoff = len(self._history)
         # One id per awake session — keeps dispatch_task's multi-turn calendar
-        # confirmation ("так"/"ні") tied to the same server-side session on the
-        # agent-ecosystem side, without the assistant needing to track any of
-        # that state itself.
+        # confirmation ("так"/"ні") tied to the same session.
         self._router_session_id = str(uuid.uuid4())
         self.rt = RealtimeConversation(
             tools=TOOLS,
@@ -707,6 +735,177 @@ class Assistant:
             else:
                 self.state = State.SLEEPING
                 time.sleep(1.5)  # let echo of the farewell settle before listening again
+
+    def _run_awake_session_live(self) -> None:
+        """GPT-Live path: full duplex + Responses delegation. No manual turn create."""
+        self._sleep_requested = False
+        self._voice_change_pending = False
+        self._history_cutoff = None
+        self._pending_cutoff = len(self._history)
+        self._router_session_id = str(uuid.uuid4())
+        voice = self._memory.get("realtime_voice") or self._memory.get("live_voice") or OPENAI_LIVE_VOICE
+        mic = LiveMicCapture(self.stt.read_chunk)
+        mic.open()
+        live = LiveVoiceSession(
+            tool_executor=self._tool_executor,
+            voice=voice,
+            session_id=self._router_session_id,
+            on_user_transcript=self._on_live_user_transcript_fragment,
+        )
+        self._live = live
+        try:
+            live.connect(
+                build_live_prompt(
+                    language_name=LANGUAGE_OPTIONS.get(self._memory.get("language", "uk"), LANGUAGE_OPTIONS["uk"]),
+                    assistant_name=self._memory.get("assistant_name"),
+                    today=date.today().isoformat(),
+                ),
+                mic_read_chunk=mic.read_chunk,
+                backend_instructions=build_backend_prompt(
+                    today=date.today().isoformat(),
+                    language_name=LANGUAGE_OPTIONS.get(self._memory.get("language", "uk"), LANGUAGE_OPTIONS["uk"]),
+                ),
+            )
+            live.speak_context("Слухаю!")
+            if alert := self._connectivity_watcher.pop_alert():
+                live.speak_context(alert)
+            t_start = time.monotonic()
+            while self._running and not live.sleep_requested and not self._sleep_requested:
+                # Live owns turn-taking; we only poll lifecycle flags + local robot safety.
+                action = self._match_pending_robot_from_live()
+                if action:
+                    self._execute_robot_trigger_live(action)
+                time.sleep(0.05)
+            logger.info("[latency] Live awake session duration: %.1fs", time.monotonic() - t_start)
+            live.stop_playback()
+            if not live.voice_restart_requested and not self._voice_change_pending:
+                live.speak_context("До побачення!")
+                time.sleep(1.0)
+        except Exception:
+            logger.error("Live awake session crashed; closing before sleep.", exc_info=True)
+            raise
+        finally:
+            turns = live.get_turns()
+            self._history = turns[: self._history_cutoff] if self._history_cutoff is not None else turns
+            live.close()
+            self._live = None
+            mic.close()
+            if live.voice_restart_requested or self._voice_change_pending:
+                # Live: restart a new awake session with the new voice — do NOT kill the process.
+                logger.info("Live voice change — restarting voice session without process exit.")
+                self._voice_change_pending = False
+                self.state = State.AWAKE
+            else:
+                self.state = State.SLEEPING
+                time.sleep(1.5)
+
+    def _on_live_user_transcript_fragment(self, fragment: str) -> None:
+        # Accumulate for local robot fast-path; full turns flush inside LiveVoiceSession.
+        buf = getattr(self, "_live_user_frag", "") + fragment
+        self._live_user_frag = buf
+        action = _match_robot_trigger(buf.lower())
+        if action:
+            self._live_pending_robot = action
+            self._live_user_frag = ""
+
+    def _match_pending_robot_from_live(self) -> str | None:
+        action = getattr(self, "_live_pending_robot", None)
+        self._live_pending_robot = None
+        return action
+
+    def _execute_robot_trigger_live(self, action: str) -> None:
+        method = getattr(self.robot, action, None)
+        if method is None or self._live is None:
+            return
+        try:
+            method()
+            self._live.speak_context(_ROBOT_ACTION_TEXT.get(action, "Готово."))
+        except Exception as exc:
+            logger.error("Robot trigger action %r failed: %s", action, exc, exc_info=True)
+            self._live.speak_context("Не вдалося виконати команду роботом.")
+
+    # ── Live tool handlers (registered on ToolExecutor; no Gmail) ─────────────
+
+    def _live_set_name(self, args: dict, context: ToolExecutionContext) -> ToolResult:
+        del context
+        new_name = _sanitize_name(args.get("name", ""))
+        if not new_name:
+            return ToolResult(ok=False, status="error", message="Не зрозумів нового імені.")
+        msg = self._set_assistant_name(new_name)
+        return ToolResult(ok=True, status="ok", message=msg)
+
+    def _live_change_voice(self, args: dict, context: ToolExecutionContext) -> ToolResult:
+        del context
+        voice = str(args.get("voice", "")).strip().lower()
+        if voice not in VOICE_OPTIONS:
+            return ToolResult(
+                ok=False,
+                status="error",
+                message=f"Голос {voice!r} не підтримується — скажи користувачу спробувати ще раз.",
+            )
+        self._memory["realtime_voice"] = voice
+        self._memory["live_voice"] = voice
+        self._save_memory()
+        self._voice_change_pending = True
+        if self._live is not None:
+            self._live.request_voice_restart()
+        return ToolResult(
+            ok=True,
+            status="ok",
+            message=(
+                f"Голос змінено на {voice}. Зараз коротко попрощаюсь і одразу продовжу новим голосом "
+                "без перезапуску програми."
+            ),
+        )
+
+    def _live_change_language(self, args: dict, context: ToolExecutionContext) -> ToolResult:
+        del context
+        language = str(args.get("language", "")).strip().lower()
+        if language not in LANGUAGE_OPTIONS:
+            return ToolResult(
+                ok=False,
+                status="error",
+                message=f"Мова {language!r} не підтримується — скажи користувачу спробувати ще раз.",
+            )
+        self._memory["language"] = language
+        self._save_memory()
+        lang_name = LANGUAGE_OPTIONS[language]
+        if self._live is not None:
+            self._live.append_instruction(f"From now on speak exclusively in {lang_name}.")
+        return ToolResult(
+            ok=True,
+            status="ok",
+            message=f"Мову змінено на {lang_name}. Наступну репліку скажи вже цією мовою.",
+        )
+
+    def _live_end_conversation(self, args: dict, context: ToolExecutionContext) -> ToolResult:
+        del args, context
+        self._sleep_requested = True
+        self._history_cutoff = self._pending_cutoff
+        if self._live is not None:
+            self._live.request_sleep()
+        return ToolResult(ok=True, status="ok", message="Розмову завершено.")
+
+    def _live_check_connection(self, args: dict, context: ToolExecutionContext) -> ToolResult:
+        del args, context
+        return agent_result_to_tool_result(_run_connectivity_checks(self.router))
+
+    def _live_control_robot(self, args: dict, context: ToolExecutionContext) -> ToolResult:
+        del context
+        action = str(args.get("action", "")).strip().lower()
+        method = getattr(self.robot, action, None) if action in ROBOT_ACTIONS else None
+        if method is None:
+            return ToolResult(ok=False, status="error", message=f"Команда {action!r} не підтримується.")
+        try:
+            method()
+            return ToolResult(ok=True, status="ok", message=_ROBOT_ACTION_TEXT.get(action, "Готово."))
+        except Exception as exc:
+            logger.error("Robot action %r failed: %s", action, exc, exc_info=True)
+            return ToolResult(ok=False, status="error", message="Не вдалося виконати команду роботом.")
+
+    def _live_google_account(self, args: dict, context: ToolExecutionContext) -> ToolResult:
+        del context
+        return agent_result_to_tool_result(self._google_account(args))
 
     # ── Tool calls (assistant commands) ───────────────────────────────────────
 
@@ -967,12 +1166,14 @@ class Assistant:
         self._save_memory()
         if self.rt is not None:
             self.rt.update_instructions(self._build_instructions())
+        if self._live is not None:
+            self._live.append_instruction(f"Your name is now {name}. Introduce yourself with that name.")
         return f"Ім'я асистента змінено на {name}."
 
     def _change_voice(self, voice: str) -> str:
         """Persists the chosen voice and ends this session — the Realtime API
         fixes the output voice for the lifetime of one connection, so there's
-        no way to hot-swap it mid-conversation. See _run_awake_session's
+        no way to hot-swap it mid-conversation. See _run_awake_session_realtime's
         _voice_change_pending handling for the actual shutdown."""
         if voice not in VOICE_OPTIONS:
             return f"Голос {voice!r} не підтримується — скажи користувачу спробувати ще раз."
@@ -997,6 +1198,9 @@ class Assistant:
         if self.rt is not None:
             self.rt.update_instructions(self._build_instructions())
             self.rt.update_transcription_language(language)
+        if self._live is not None:
+            lang_name = LANGUAGE_OPTIONS[language]
+            self._live.append_instruction(f"From now on speak exclusively in {lang_name}.")
         return f"Мову змінено на {LANGUAGE_OPTIONS[language]}. Наступну репліку скажи вже цією мовою."
 
     # ── Helpers ───────────────────────────────────────────────────────────────
@@ -1007,6 +1211,8 @@ class Assistant:
     def _cleanup(self) -> None:
         if self.rt is not None:
             self.rt.close()
+        if self._live is not None:
+            self._live.close()
         self.tts.cleanup()
         self.stt.close()
         logger.info("Assistant shut down cleanly.")

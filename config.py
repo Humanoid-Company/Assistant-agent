@@ -27,12 +27,25 @@ PID_FILE: Path = _ROOT / "assistant.pid"
 # ── Language ──────────────────────────────────────────────────────────────────
 LANGUAGE_BCP47: str = "uk-UA"
 
-# ── OpenAI Realtime API ───────────────────────────────────────────────────────
+# ── Voice engine selection ────────────────────────────────────────────────────
+# Conservative default: keep the existing Realtime path unless explicitly opted in.
+# VOICE_ENGINE=live  → GPT-Live (gpt-live-1) + Responses delegation
+# VOICE_ENGINE=realtime → legacy Realtime (unchanged)
+VOICE_ENGINE: str = os.getenv("VOICE_ENGINE", "realtime").strip().lower()
+
+# ── OpenAI Realtime API (legacy) ──────────────────────────────────────────────
 REALTIME_MODEL: str = "gpt-realtime"
 REALTIME_VOICE: str = "marin"
 REALTIME_SILENCE_MS: int = 600
 STT_REALTIME_MODEL: str = "gpt-4o-mini-transcribe"
 STT_REALTIME_LANGUAGE: str = "uk"
+
+# ── OpenAI GPT-Live API ───────────────────────────────────────────────────────
+OPENAI_LIVE_MODEL: str = os.getenv("OPENAI_LIVE_MODEL", "gpt-live-1")
+# Responses delegation backend — configurable; default from current OpenAI Live docs.
+OPENAI_LIVE_BACKEND_MODEL: str = os.getenv("OPENAI_LIVE_BACKEND_MODEL", "gpt-6-luna")
+OPENAI_LIVE_VOICE: str = os.getenv("OPENAI_LIVE_VOICE", REALTIME_VOICE)
+OPENAI_LIVE_AUDIO_RATE: int = int(os.getenv("OPENAI_LIVE_AUDIO_RATE", "24000"))
 
 # ── OpenAI TTS ────────────────────────────────────────────────────────────────
 TTS_VOICE: str = "nova"
