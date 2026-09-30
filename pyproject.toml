@@ -1,0 +1,26 @@
+[project]
+name = "voice-agent-v3-2"
+version = "3.2.1"
+description = "Voice assistant with direct Google Calendar/Gmail APIs (no n8n)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "openai[realtime]>=2.0.0",
+    "SpeechRecognition>=3.10.0",
+    "sounddevice>=0.4.6",
+    "pygame-ce>=2.5.0",
+    "webrtcvad>=2.0.10",
+    "numpy>=1.24.0,<2",
+    "python-dotenv>=1.0.0",
+    "httpx>=0.28.0",
+    "setuptools<81",
+    "google-auth>=2.29.0",
+    "google-auth-oauthlib>=1.2.0",
+    "google-api-python-client>=2.127.0",
+    "keyring>=25.0.0",
+    "tzdata>=2024.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2",
+]
