@@ -8,9 +8,9 @@
 локальний **Agent Router** → **Google Calendar / Gmail** через OAuth Desktop flow.
 n8n і зовнішній `agent-ecosystem` **не потрібні**.
 
-- **realtime** (за замовчуванням): legacy OpenAI Realtime — Calendar + Gmail як раніше.
-- **live**: GPT-Live (`gpt-live-1`) + Responses delegation — Calendar structured tools;
-  Gmail у Live **навмисно не мігровано** (залишається на Realtime).
+- **realtime** (за замовчуванням): legacy OpenAI Realtime — Calendar + Gmail (`gmail_action`).
+- **live**: GPT-Live (`gpt-live-1`) + Responses delegation — Calendar + structured Gmail tools
+  (`gmail_search_messages`, `gmail_prepare_send`, `gmail_confirm_send`, …).
 
 Користувач входить своїм Google-акаунтом у системному браузері. Один Google Cloud Project
 належить розробнику застосунку; кінцевий користувач не створює workflow і не вводить API-ключі.

@@ -63,7 +63,7 @@ def test_tool_executor_routing_and_errors():
     bad = ex.execute_sync("calendar_prepare_create", "{not-json", ctx)
     assert bad.status == "error"
 
-    unknown = ex.execute_sync("gmail_action", {}, ctx)
+    unknown = ex.execute_sync("totally_unknown_tool", {}, ctx)
     assert unknown.status == "error"
     assert "Невідома" in unknown.message
 
@@ -205,7 +205,7 @@ def test_function_result_continues_backend_exactly_once():
     conn.response.create.assert_awaited_once()
 
 
-def test_live_backend_tools_exclude_gmail_and_note_emotion():
+def test_live_backend_tools_include_gmail_structured_not_gmail_action():
     from tools.live_schemas import LIVE_BACKEND_TOOLS
 
     names = {t["name"] for t in LIVE_BACKEND_TOOLS}
@@ -214,6 +214,13 @@ def test_live_backend_tools_exclude_gmail_and_note_emotion():
     assert "dispatch_task" not in names
     assert "calendar_prepare_create" in names
     assert "calendar_confirm_operation" in names
+    assert "gmail_search_messages" in names
+    assert "gmail_read_message" in names
+    assert "gmail_create_draft" in names
+    assert "gmail_prepare_send" in names
+    assert "gmail_prepare_reply" in names
+    assert "gmail_confirm_send" in names
+    assert "gmail_reject_send" in names
 
 
 def test_agent_result_to_tool_result_preserves_op_id():

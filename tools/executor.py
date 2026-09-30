@@ -1,26 +1,49 @@
 """Central tool executor for GPT-Live Responses delegation (and reusable by tests)."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from agents.types import AgentResult
 from tools.calendar_tools import CalendarToolWrappers
+from tools.gmail_tools import GmailToolWrappers
 from tools.results import ToolResult, agent_result_to_tool_result
 from tools.task_context import TaskRevisionTracker
 
 logger = logging.getLogger(__name__)
+
+HandlerFn = Callable[[dict[str, Any], "ToolExecutionContext"], "ToolResult | AgentResult | str"]
 
 _MUTATING_PREPARE = frozenset(
     {
         "calendar_prepare_create",
         "calendar_prepare_update",
         "calendar_prepare_delete",
+        "gmail_prepare_send",
+        "gmail_prepare_reply",
     }
 )
-_CONFIRM_TOOLS = frozenset({"calendar_confirm_operation", "calendar_reject_operation"})
+_CONFIRM_TOOLS = frozenset(
+    {
+        "calendar_confirm_operation",
+        "calendar_reject_operation",
+        "gmail_confirm_send",
+        "gmail_reject_send",
+    }
+)
+
+# Built-in calendar/gmail wrappers always use blocking Google HTTP clients.
+_ALWAYS_THREADED_PREFIXES = ("calendar_", "gmail_")
+
+
+@dataclass
+class _HandlerSpec:
+    handler: HandlerFn
+    run_in_thread: bool = False
 
 
 @dataclass
@@ -39,13 +62,19 @@ class ToolExecutor:
         self,
         *,
         calendar: CalendarToolWrappers,
+        gmail: GmailToolWrappers | None = None,
         revisions: TaskRevisionTracker | None = None,
-        handlers: dict[str, Callable[[dict[str, Any], ToolExecutionContext], ToolResult | AgentResult | str]]
-        | None = None,
+        handlers: dict[str, HandlerFn | _HandlerSpec] | None = None,
     ) -> None:
         self._calendar = calendar
+        self._gmail = gmail
         self._revisions = revisions or TaskRevisionTracker()
-        self._handlers = handlers or {}
+        self._handlers: dict[str, _HandlerSpec] = {}
+        for name, handler in (handlers or {}).items():
+            if isinstance(handler, _HandlerSpec):
+                self._handlers[name] = handler
+            else:
+                self._handlers[name] = _HandlerSpec(handler, run_in_thread=False)
 
     @property
     def revisions(self) -> TaskRevisionTracker:
@@ -54,9 +83,17 @@ class ToolExecutor:
     def register(
         self,
         name: str,
-        handler: Callable[[dict[str, Any], ToolExecutionContext], ToolResult | AgentResult | str],
+        handler: HandlerFn,
+        *,
+        run_in_thread: bool = False,
     ) -> None:
-        self._handlers[name] = handler
+        self._handlers[name] = _HandlerSpec(handler, run_in_thread=run_in_thread)
+
+    def is_offloaded(self, name: str) -> bool:
+        spec = self._handlers.get(name)
+        if spec is not None:
+            return spec.run_in_thread
+        return name.startswith(_ALWAYS_THREADED_PREFIXES)
 
     async def execute(
         self,
@@ -89,6 +126,14 @@ class ToolExecutor:
             parsed = dict(parsed)
             parsed["user_utterances"] = context.user_utterances
 
+        started = time.monotonic()
+        logger.info(
+            "live.tool.started tool_name=%s session_id=%s delegation_id=%s offloaded=%s",
+            name,
+            context.session_id,
+            context.delegation_id,
+            self.is_offloaded(name),
+        )
         try:
             raw = await self._dispatch(name, parsed, context)
         except TypeError as exc:
@@ -117,6 +162,14 @@ class ToolExecutor:
             )
 
         result = self._normalize(raw)
+        duration_ms = int((time.monotonic() - started) * 1000)
+        logger.info(
+            "live.tool.completed tool_name=%s session_id=%s status=%s duration_ms=%s",
+            name,
+            context.session_id,
+            result.status,
+            duration_ms,
+        )
         # Bump revision only after a successful new pending prepare so a failed
         # prepare (busy/PendingConflict) cannot stale the still-valid op_id.
         if name in _MUTATING_PREPARE and result.status == "confirmation_required" and result.op_id:
@@ -134,8 +187,6 @@ class ToolExecutor:
         context: ToolExecutionContext,
     ) -> ToolResult:
         """Sync entry for unit tests / sync callers."""
-        import asyncio
-
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -151,25 +202,72 @@ class ToolExecutor:
         context: ToolExecutionContext,
     ) -> ToolResult | AgentResult | str:
         if name in self._handlers:
-            return self._handlers[name](args, context)
+            spec = self._handlers[name]
+            return await self._call_handler(name, spec, args, context)
 
         sid = context.session_id
-        if name == "calendar_list_events":
-            return self._calendar.list_events(args, session_id=sid)
-        if name == "calendar_search_events":
-            return self._calendar.search_events(args, session_id=sid)
-        if name == "calendar_prepare_create":
-            return self._calendar.prepare_create(args, session_id=sid)
-        if name == "calendar_prepare_update":
-            return self._calendar.prepare_update(args, session_id=sid)
-        if name == "calendar_prepare_delete":
-            return self._calendar.prepare_delete(args, session_id=sid)
-        if name == "calendar_confirm_operation":
-            return self._calendar.confirm(args, session_id=sid)
-        if name == "calendar_reject_operation":
-            return self._calendar.reject(args, session_id=sid)
+
+        def _calendar_call() -> AgentResult:
+            if name == "calendar_list_events":
+                return self._calendar.list_events(args, session_id=sid)
+            if name == "calendar_search_events":
+                return self._calendar.search_events(args, session_id=sid)
+            if name == "calendar_prepare_create":
+                return self._calendar.prepare_create(args, session_id=sid)
+            if name == "calendar_prepare_update":
+                return self._calendar.prepare_update(args, session_id=sid)
+            if name == "calendar_prepare_delete":
+                return self._calendar.prepare_delete(args, session_id=sid)
+            if name == "calendar_confirm_operation":
+                return self._calendar.confirm(args, session_id=sid)
+            if name == "calendar_reject_operation":
+                return self._calendar.reject(args, session_id=sid)
+            raise KeyError(name)
+
+        if name.startswith("calendar_"):
+            logger.info("live.tool.offloaded_to_thread tool_name=%s", name)
+            return await asyncio.to_thread(_calendar_call)
+
+        if name.startswith("gmail_"):
+            if self._gmail is None:
+                return ToolResult(ok=False, status="error", message="Gmail tools are not configured.")
+
+            def _gmail_call() -> AgentResult:
+                if name == "gmail_search_messages":
+                    return self._gmail.search_messages(args, session_id=sid)
+                if name == "gmail_read_message":
+                    return self._gmail.read_message(args, session_id=sid)
+                if name == "gmail_create_draft":
+                    return self._gmail.create_draft(args, session_id=sid)
+                if name == "gmail_prepare_send":
+                    return self._gmail.prepare_send(args, session_id=sid)
+                if name == "gmail_prepare_reply":
+                    return self._gmail.prepare_reply(args, session_id=sid)
+                if name == "gmail_confirm_send":
+                    return self._gmail.confirm_send(args, session_id=sid)
+                if name == "gmail_reject_send":
+                    return self._gmail.reject_send(args, session_id=sid)
+                raise KeyError(name)
+
+            logger.info("live.tool.offloaded_to_thread tool_name=%s", name)
+            try:
+                return await asyncio.to_thread(_gmail_call)
+            except KeyError:
+                return ToolResult(ok=False, status="error", message=f"Невідома команда: {name}")
 
         return ToolResult(ok=False, status="error", message=f"Невідома команда: {name}")
+
+    async def _call_handler(
+        self,
+        name: str,
+        spec: _HandlerSpec,
+        args: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolResult | AgentResult | str:
+        if spec.run_in_thread:
+            logger.info("live.tool.offloaded_to_thread tool_name=%s", name)
+            return await asyncio.to_thread(spec.handler, args, context)
+        return spec.handler(args, context)
 
     @staticmethod
     def _parse_arguments(arguments: dict[str, Any] | str | None) -> dict[str, Any] | None:

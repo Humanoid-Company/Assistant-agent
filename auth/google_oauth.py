@@ -14,7 +14,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 from auth.scopes import IDENTITY_SCOPES, scope_labels
-from auth.token_store import TokenStore
+from auth.token_store import TokenStore, TokenStoreError
 
 logger = logging.getLogger(__name__)
 
@@ -106,12 +106,44 @@ class GoogleOAuthClient:
 
         identity = self.fetch_identity(credentials)
         scopes = self._extract_granted_scopes(credentials)
-        self._store.save_record(identity.sub, credentials.to_json(), scopes)
+        try:
+            object.__setattr__(credentials, "granted_scopes", scopes)
+        except Exception:
+            pass
+        try:
+            self._store.save_record(identity.sub, credentials.to_json(), scopes)
+        except TokenStoreError as exc:
+            logger.error(
+                "google.oauth.completed but token persist failed sub=%s… error=%s",
+                identity.sub[:8],
+                type(exc).__name__,
+            )
+            raise OAuthError(
+                "token_store_failed",
+                "Авторизацію Google завершено в браузері, але зберегти доступ на цьому комп'ютері "
+                "не вдалося. Повтори підключення; без збережених credentials пошта недоступна.",
+            ) from exc
+        except Exception as exc:
+            logger.error(
+                "google.oauth.completed but token persist failed sub=%s… error=%s",
+                identity.sub[:8],
+                type(exc).__name__,
+            )
+            raise OAuthError(
+                "token_store_failed",
+                "Авторизацію Google завершено в браузері, але зберегти доступ на цьому комп'ютері "
+                "не вдалося. Повтори підключення; без збережених credentials пошта недоступна.",
+            ) from exc
         logger.info(
-            "OAuth success for email=%s sub=%s… scopes=%s",
+            "google.oauth.completed email=%s sub=%s… scopes=%s",
             identity.email,
             identity.sub[:8],
             sorted(scopes),
+        )
+        logger.info(
+            "google.permission.granted sub=%s… scope_count=%s",
+            identity.sub[:8],
+            len(scopes),
         )
         return identity, credentials
 
@@ -179,7 +211,13 @@ class GoogleOAuthClient:
                 "Доступ Google відкликано або прострочено. Підключіть акаунт знову.",
             ) from exc
         # Refresh must not invent new scopes — re-persist the known granted set.
-        self._store.save_record(google_sub, credentials.to_json(), scopes)
+        try:
+            self._store.save_record(google_sub, credentials.to_json(), scopes)
+        except TokenStoreError as exc:
+            raise OAuthError(
+                "token_store_failed",
+                "Не вдалося зберегти оновлений доступ Google на цьому комп'ютері.",
+            ) from exc
         return credentials
 
     def has_scopes(self, credentials: Credentials, required: tuple[str, ...] | list[str]) -> bool:

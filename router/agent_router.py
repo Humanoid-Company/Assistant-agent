@@ -166,7 +166,12 @@ class AgentRouter:
                 op_id=op_id,
             )
         if kind.startswith("gmail"):
-            return self.gmail.handle("confirm", confirmation=confirmation)
+            return self.gmail.handle(
+                "confirm",
+                confirmation=confirmation,
+                session_id=session_id,
+                op_id=op_id,
+            )
         return AgentResult("error", "Невідомий тип очікуваної дії.")
 
     def connect_google(self, *, with_gmail: bool = False) -> AgentResult:
@@ -219,6 +224,7 @@ class AgentRouter:
             attempt.message,
             {
                 "auth_ok": True,
+                "permission_granted": True,
                 "gmail_ready": attempt.status.gmail_ready,
                 "granted_scopes": attempt.status.granted_scopes,
             },

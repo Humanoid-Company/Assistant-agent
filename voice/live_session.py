@@ -1,10 +1,11 @@
-"""GPT-Live voice session with Responses delegation (calendar tools, no Gmail)."""
+"""GPT-Live voice session with Responses delegation (calendar + Gmail tools)."""
 from __future__ import annotations
 
 import asyncio
 import base64
 import logging
 import threading
+import time
 import uuid
 from typing import Any, Callable, Optional
 
@@ -22,6 +23,9 @@ from voice.delegation import extract_completed_function_call
 from voice.playback import PlaybackTracker
 
 logger = logging.getLogger(__name__)
+
+_BARGE_IN_COOLDOWN_S = 0.75
+_SHUTDOWN_WAIT_S = 3.0
 
 
 def _event_attr(obj: Any, name: str, default: Any = None) -> Any:
@@ -73,8 +77,12 @@ class LiveVoiceSession:
         self._live_instructions = ""
         self._backend_instructions = ""
         self._tasks: set[asyncio.Task] = set()
+        self._tool_tasks: set[asyncio.Task] = set()
         self._pending_tool_calls: dict[str, set[str]] = {}  # response_id -> call_ids awaiting output
         self._delegation_ids: dict[str, str] = {}  # response_id -> delegation_id
+        self._last_barge_in_at = 0.0
+        self._close_sent = False
+        self._session_closing = False
 
     @property
     def sleep_requested(self) -> bool:
@@ -144,20 +152,36 @@ class LiveVoiceSession:
         self.player.interrupt()
 
     def close(self) -> None:
+        """Graceful close — do not wait forever for OAuth/browser worker threads."""
         self._sleep_requested = True
+        self._session_closing = True
         loop = self._loop
         if loop is not None and loop.is_running():
             fut = asyncio.run_coroutine_threadsafe(self._shutdown(), loop)
             try:
-                fut.result(timeout=20)
+                fut.result(timeout=_SHUTDOWN_WAIT_S)
+            except TimeoutError:
+                logger.warning(
+                    "live.session.closed shutdown timeout session_id=%s — forcing local cleanup",
+                    self.session_id,
+                )
+                try:
+                    loop.call_soon_threadsafe(self._cancel_owned_tasks_soon)
+                except Exception:
+                    pass
             except Exception:
                 logger.exception("live.session.closed shutdown error session_id=%s", self.session_id)
         self._closed.set()
         if self._thread is not None:
-            self._thread.join(timeout=5)
+            self._thread.join(timeout=2.0)
             self._thread = None
         self.player.close()
         logger.info("live.session.closed session_id=%s", self.session_id)
+
+    def _cancel_owned_tasks_soon(self) -> None:
+        for task in list(self._tool_tasks) + list(self._tasks):
+            if not task.done():
+                task.cancel()
 
     # ── thread / asyncio ──────────────────────────────────────────────────────
 
@@ -290,6 +314,16 @@ class LiveVoiceSession:
             return
         if etype == "session.input_transcript.delta":
             frag = _event_attr(event, "delta") or ""
+            # Local barge-in: WebSocket Live does not auto-stop our PCM speaker queue.
+            if isinstance(frag, str) and frag.strip() and self.player.is_playing:
+                now = time.monotonic()
+                if now - self._last_barge_in_at >= _BARGE_IN_COOLDOWN_S:
+                    self.player.interrupt()
+                    self._last_barge_in_at = now
+                    logger.info(
+                        "live.barge_in session_id=%s source=input_transcript",
+                        self.session_id,
+                    )
             self._input_buf += frag
             if self._on_user_transcript:
                 try:
@@ -363,13 +397,32 @@ class LiveVoiceSession:
                 completed.call_id,
                 completed.name,
             )
-            await self._execute_and_continue(
-                name=completed.name,
-                arguments=completed.arguments,
-                call_id=completed.call_id,
-                delegation_id=completed.delegation_id,
-                response_id=completed.response_id,
+            # Do NOT await on the recv loop — blocking tools must not freeze mic/events.
+            task = asyncio.create_task(
+                self._execute_and_continue(
+                    name=completed.name,
+                    arguments=completed.arguments,
+                    call_id=completed.call_id,
+                    delegation_id=completed.delegation_id,
+                    response_id=completed.response_id,
+                )
             )
+            self._tool_tasks.add(task)
+
+            def _done(done_task: asyncio.Task, *, call_id: str = completed.call_id) -> None:
+                self._tool_tasks.discard(done_task)
+                if done_task.cancelled():
+                    return
+                exc = done_task.exception()
+                if exc is not None:
+                    logger.error(
+                        "live.tool.completed unexpected error call_id=%s error=%s",
+                        call_id,
+                        type(exc).__name__,
+                        exc_info=exc,
+                    )
+
+            task.add_done_callback(_done)
             return
 
     async def _execute_and_continue(
@@ -392,6 +445,15 @@ class LiveVoiceSession:
             or None,
         )
         result = await self._executor.execute(name, arguments, ctx)
+        # Session may have closed while a blocking OAuth/Google call ran in a worker thread.
+        if self._session_closing or self._closed.is_set() or self._connection is None:
+            logger.info(
+                "live.tool.completed discarded session_id=%s call_id=%s tool_name=%s — session closed",
+                self.session_id,
+                call_id,
+                name,
+            )
+            return
         result_json = result.to_json()
         if name == "end_conversation" and result.ok:
             self._sleep_requested = True
@@ -409,19 +471,26 @@ class LiveVoiceSession:
             ctx.task_revision,
         )
 
-        await self._connection.response.item.create(
-            event_id=f"tool_result_{call_id}",
-            item={
-                "type": "function_call_output",
-                "call_id": call_id,
-                "output": result_json,
-            },
-        )
+        try:
+            await self._connection.response.item.create(
+                event_id=f"tool_result_{call_id}",
+                item={
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": result_json,
+                },
+            )
+        except Exception:
+            if self._session_closing or self._closed.is_set():
+                return
+            raise
         if response_id and response_id in self._pending_tool_calls:
             self._pending_tool_calls[response_id].discard(call_id)
             # Continue only when all pending calls for this response have results.
             if self._pending_tool_calls[response_id]:
                 return
+        if self._session_closing or self._closed.is_set() or self._connection is None:
+            return
         await self._connection.response.create(event_id=f"continue_{call_id}")
         logger.info(
             "live.backend.response_continued session_id=%s delegation_id=%s call_id=%s",
@@ -445,10 +514,18 @@ class LiveVoiceSession:
         )
 
     async def _shutdown(self) -> None:
-        if self._connection is not None and not getattr(self, "_close_sent", False):
+        self._session_closing = True
+        self._sleep_requested = True
+        for task in list(self._tool_tasks):
+            if not task.done():
+                task.cancel()
+        if self._tool_tasks:
+            await asyncio.gather(*list(self._tool_tasks), return_exceptions=True)
+            self._tool_tasks.clear()
+        if self._connection is not None and not self._close_sent:
             self._close_sent = True
             try:
-                await self._connection.session.close()
+                await asyncio.wait_for(self._connection.session.close(), timeout=2.0)
             except Exception:
                 try:
                     await self._connection.close()

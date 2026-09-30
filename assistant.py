@@ -55,6 +55,7 @@ from speech_to_text import SpeechToText
 from text_to_speech import TextToSpeech
 from tools.calendar_tools import CalendarToolWrappers
 from tools.executor import ToolExecutionContext, ToolExecutor
+from tools.gmail_tools import GmailToolWrappers
 from tools.results import ToolResult, agent_result_to_tool_result
 from tools.task_context import TaskRevisionTracker
 from voice.factory import normalize_voice_engine
@@ -152,7 +153,17 @@ def calendar_tool_args(
 
 
 def _gmail_kwargs(args: dict) -> dict:
-    keys = ("action", "to", "subject", "body", "query", "message_id", "draft_id", "confirmation")
+    keys = (
+        "action",
+        "to",
+        "subject",
+        "body",
+        "query",
+        "message_id",
+        "draft_id",
+        "confirmation",
+        "op_id",
+    )
     out = {k: args[k] for k in keys if k in args and args[k] is not None}
     if "action" in out:
         out["action"] = str(out["action"]).strip().lower()
@@ -377,6 +388,7 @@ TOOLS: list[dict] = [
                 "message_id": {"type": "string"},
                 "draft_id": {"type": "string"},
                 "confirmation": {"type": "string", "enum": ["yes", "no"]},
+                "op_id": {"type": "string", "description": "op_id з confirmation_required."},
             },
             "required": ["action"],
         },
@@ -600,14 +612,17 @@ class Assistant:
 
     def _build_tool_executor(self) -> ToolExecutor:
         calendar = CalendarToolWrappers(self.router.calendar_action)
-        executor = ToolExecutor(calendar=calendar, revisions=self._task_revisions)
-        executor.register("set_assistant_name", self._live_set_name)
-        executor.register("change_voice", self._live_change_voice)
-        executor.register("change_language", self._live_change_language)
-        executor.register("end_conversation", self._live_end_conversation)
-        executor.register("check_connection", self._live_check_connection)
-        executor.register("control_robot", self._live_control_robot)
-        executor.register("google_account", self._live_google_account)
+        gmail = GmailToolWrappers(self.router.gmail_action)
+        executor = ToolExecutor(calendar=calendar, gmail=gmail, revisions=self._task_revisions)
+        # Fast local memory/state updates can stay on the Live loop.
+        executor.register("set_assistant_name", self._live_set_name, run_in_thread=False)
+        executor.register("change_voice", self._live_change_voice, run_in_thread=False)
+        executor.register("change_language", self._live_change_language, run_in_thread=False)
+        executor.register("end_conversation", self._live_end_conversation, run_in_thread=False)
+        # Blocking network / browser / hardware work must leave the Live event loop.
+        executor.register("check_connection", self._live_check_connection, run_in_thread=True)
+        executor.register("control_robot", self._live_control_robot, run_in_thread=True)
+        executor.register("google_account", self._live_google_account, run_in_thread=True)
         return executor
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -950,7 +965,9 @@ class Assistant:
                 )
                 return None
             if name == "gmail_action":
-                self._run_router_tool(call_id, lambda: self.router.gmail_action(**_gmail_kwargs(args)))
+                gmail_args = _gmail_kwargs(args)
+                gmail_args["session_id"] = self._router_session_id
+                self._run_router_tool(call_id, lambda: self.router.gmail_action(**gmail_args))
                 return None
             if name == "dispatch_task":
                 task = args.get("task", "").strip()

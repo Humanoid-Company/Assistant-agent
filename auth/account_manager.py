@@ -257,6 +257,16 @@ class AccountManager:
             self._save_state()
             st = self.status()
             st.last_auth_ok = True
+            if st.gmail_ready:
+                st.message = (
+                    "Дозвіл Gmail надано (permission_granted). "
+                    "Можна одразу шукати й читати пошту — повторна авторизація не потрібна."
+                )
+            logger.info(
+                "google.permission.granted sub=%s… gmail_ready=%s",
+                identity.sub[:8],
+                st.gmail_ready,
+            )
             return AuthAttemptResult(ok=True, status=st, message=st.message)
 
     def request_calendar_permission(self) -> AuthAttemptResult:
