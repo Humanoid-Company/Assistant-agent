@@ -47,6 +47,40 @@ OPENAI_LIVE_BACKEND_MODEL: str = os.getenv("OPENAI_LIVE_BACKEND_MODEL", "gpt-6-l
 OPENAI_LIVE_VOICE: str = os.getenv("OPENAI_LIVE_VOICE", REALTIME_VOICE)
 OPENAI_LIVE_AUDIO_RATE: int = int(os.getenv("OPENAI_LIVE_AUDIO_RATE", "24000"))
 
+# ── Live voice UX: local barge-in + busy cues ─────────────────────────────────
+# Local WebRTC VAD stops assistant playback before transcripts arrive.
+VOICE_LOCAL_BARGE_IN: bool = os.getenv("VOICE_LOCAL_BARGE_IN", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+# Default 3 frames (~90 ms) — less click/cough false positives; still sub-300 ms confirm.
+VOICE_BARGE_IN_ONSET_FRAMES: int = int(os.getenv("VOICE_BARGE_IN_ONSET_FRAMES", "3"))
+VOICE_BARGE_IN_COOLDOWN_MS: int = int(os.getenv("VOICE_BARGE_IN_COOLDOWN_MS", "500"))
+# After confirmed barge-in, drop server output audio until local silence (ms).
+VOICE_BARGE_IN_SUPPRESS_MS: int = int(os.getenv("VOICE_BARGE_IN_SUPPRESS_MS", "400"))
+# Two-stage gate: duck first, confirm after sustained speech / energy / partial ASR.
+VOICE_BARGE_IN_CONFIRM_MS: int = int(os.getenv("VOICE_BARGE_IN_CONFIRM_MS", "250"))
+VOICE_BARGE_IN_MIN_SPEECH_MS: int = int(os.getenv("VOICE_BARGE_IN_MIN_SPEECH_MS", "180"))
+VOICE_BARGE_IN_DUCK_VOLUME: float = float(os.getenv("VOICE_BARGE_IN_DUCK_VOLUME", "0.3"))
+VOICE_BARGE_IN_USE_ENERGY_GATE: bool = os.getenv(
+    "VOICE_BARGE_IN_USE_ENERGY_GATE", "true"
+).lower() in ("1", "true", "yes")
+VOICE_BARGE_IN_ENERGY_MARGIN: float = float(os.getenv("VOICE_BARGE_IN_ENERGY_MARGIN", "2.2"))
+# Stricter while assistant speaks (crude echo / room-bleed guard; no hardware AEC).
+VOICE_BARGE_IN_ENERGY_MARGIN_PLAYING: float = float(
+    os.getenv("VOICE_BARGE_IN_ENERGY_MARGIN_PLAYING", "3.0")
+)
+
+VOICE_BUSY_CUES_ENABLED: bool = os.getenv("VOICE_BUSY_CUES_ENABLED", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+VOICE_BUSY_CUE_DELAY_MS: int = int(os.getenv("VOICE_BUSY_CUE_DELAY_MS", "900"))
+VOICE_BUSY_CUE_SECOND_DELAY_MS: int = int(os.getenv("VOICE_BUSY_CUE_SECOND_DELAY_MS", "3000"))
+VOICE_BUSY_CUE_MAX_PER_TURN: int = int(os.getenv("VOICE_BUSY_CUE_MAX_PER_TURN", "2"))
+
 # ── OpenAI TTS ────────────────────────────────────────────────────────────────
 TTS_VOICE: str = "nova"
 TTS_MODEL: str = "tts-1"
@@ -80,6 +114,14 @@ GOOGLE_KEYRING_SERVICE: str = os.getenv("GOOGLE_KEYRING_SERVICE", "voice-agent-g
 # cannot silently use the previous mailbox. Personal desktop keeps the session.
 SHARED_DEVICE_MODE: bool = os.getenv("SHARED_DEVICE_MODE", "false").lower() in ("1", "true", "yes")
 SESSION_IDLE_TIMEOUT_S: float = float(os.getenv("SESSION_IDLE_TIMEOUT_S", "300"))
+
+# ── Public web search (Live/Realtime tool `web_search`) ───────────────────────
+# Tavily Search API key. Empty → tool returns web_search_unavailable (session stays up).
+WEB_SEARCH_API_KEY: str = os.getenv("WEB_SEARCH_API_KEY", "").strip()
+WEB_SEARCH_TIMEOUT_S: float = float(os.getenv("WEB_SEARCH_TIMEOUT_S", "9"))
+WEB_SEARCH_MAX_RESULTS_DEFAULT: int = int(os.getenv("WEB_SEARCH_MAX_RESULTS_DEFAULT", "5"))
+WEB_SEARCH_MAX_RESULTS_HARD: int = int(os.getenv("WEB_SEARCH_MAX_RESULTS_HARD", "10"))
+WEB_SEARCH_MAX_CALLS_PER_TURN: int = int(os.getenv("WEB_SEARCH_MAX_CALLS_PER_TURN", "3"))
 
 ROUTER_TASK_CATEGORIES: str = (
     "підключення/статус Google-акаунта; "

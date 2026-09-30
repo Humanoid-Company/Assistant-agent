@@ -5,12 +5,12 @@
 ## Що робить
 
 Голосовий асистент: wake word → **voice engine** (`VOICE_ENGINE=realtime` або `live`) →
-локальний **Agent Router** → **Google Calendar / Gmail** через OAuth Desktop flow.
+локальний **Agent Router** → **Google Calendar / Gmail / нотатки (Drive+Docs)** через OAuth Desktop flow.
 n8n і зовнішній `agent-ecosystem` **не потрібні**.
 
-- **realtime** (за замовчуванням): legacy OpenAI Realtime — Calendar + Gmail (`gmail_action`).
-- **live**: GPT-Live (`gpt-live-1`) + Responses delegation — Calendar + structured Gmail tools
-  (`gmail_search_messages`, `gmail_prepare_send`, `gmail_confirm_send`, …).
+- **realtime** (за замовчуванням): legacy OpenAI Realtime — Calendar + Gmail + Notes.
+- **live**: GPT-Live (`gpt-live-1`) + Responses delegation — Calendar + Gmail + Notes
+  (`notes_add`, `notes_read`, `notes_search`, …).
 
 Користувач входить своїм Google-акаунтом у системному браузері. Один Google Cloud Project
 належить розробнику застосунку; кінцевий користувач не створює workflow і не вводить API-ключі.
@@ -19,9 +19,11 @@ n8n і зовнішній `agent-ecosystem` **не потрібні**.
 
 | Tool | Призначення |
 |---|---|
-| `google_account` | connect / status / switch / disconnect (браузерний OAuth) |
+| `google_account` | connect / status / grant_gmail / grant_notes / switch / disconnect |
 | `calendar_action` | list / search / create / reschedule / cancel / confirm |
 | `gmail_action` | search / read / draft / send / confirm |
+| `notes_action` | add / read / search (Google Doc «Нотатки від агента») |
+| `web_search` | контрольований пошук в інтернеті (Tavily; новини / факти / версії ПЗ) |
 | `dispatch_task` | вільний текст → той самий локальний роутер (сумісність) |
 | `check_connection` | стан Google-акаунта / API (не «чи живий n8n») |
 | `control_robot` | фізичні команди (`robot_control.py`, StubBackend за замовчуванням) |
@@ -42,7 +44,7 @@ cp .env.example .env   # вписати OPENAI_API_KEY
 ### 2. Google Cloud (один раз, розробник застосунку)
 
 1. Створіть проєкт у [Google Cloud Console](https://console.cloud.google.com/).
-2. Увімкніть **Google Calendar API** і **Gmail API**.
+2. Увімкніть **Google Calendar API**, **Gmail API**, **Google Drive API** і **Google Docs API**.
 3. **OAuth consent screen** → External (або Internal для Workspace).
    - Для тестового режиму додайте email тестових користувачів у Test users.
    - Gmail scopes часто вимагають верифікації Google для production — у Testing
@@ -59,18 +61,21 @@ credentials/client_secret.json
 ### 3. Запуск асистента
 
 ```bash
-# Legacy Realtime (default) — Calendar + Gmail
+# Legacy Realtime (default) — Calendar + Gmail + Notes
 uv run python main.py
 
-# GPT-Live + Calendar (Gmail not on this path yet)
+# GPT-Live — Calendar + Gmail + Notes
 # set VOICE_ENGINE=live in .env, or:
 # Windows PowerShell:
 $env:VOICE_ENGINE="live"; uv run python main.py
 ```
 
 Скажіть «привіт», потім «підключи Google» — відкриється браузер, оберіть акаунт і
-надайте дозволи (спершу Calendar; Gmail — при першому використанні пошти в Realtime
-або `google_account` з `with_gmail=true`).
+надайте дозволи (спершу Calendar; Gmail / нотатки — incremental при першому використанні
+або через `grant_gmail` / `grant_notes`).
+
+Нотатки зберігаються в Google Doc **«Нотатки від агента»** (маркер `appProperties`, не лише назва).
+Деталі: `GOOGLE_DOCS_NOTES_IMPLEMENTATION_REPORT.md`.
 
 Refresh tokens зберігаються в **OS keyring** (не в спільному `token.json`).
 
@@ -84,6 +89,10 @@ Refresh tokens зберігаються в **OS keyring** (не в спільн�
 | `OPENAI_LIVE_BACKEND_MODEL` | Responses backend (default `gpt-6-luna`) |
 | `OPENAI_LIVE_VOICE` | Live TTS voice (default `marin`) |
 | `OPENAI_LIVE_AUDIO_RATE` | default `24000` |
+| `VOICE_LOCAL_BARGE_IN` | локальний VAD barge-in (default `true`) |
+| `VOICE_BARGE_IN_CONFIRM_MS` | вікно підтвердження після duck (default `250`) |
+| `VOICE_BARGE_IN_MIN_SPEECH_MS` | мін. тривалість мови для confirm (default `180`) |
+| `VOICE_BUSY_CUES_ENABLED` | короткі «Угу.» під час довгих tools (default `true`) |
 | `GOOGLE_OAUTH_CLIENT_SECRETS_FILE` | шлях до Desktop client JSON |
 | `GOOGLE_ACCOUNT_STATE_FILE` | активний `sub` + display profiles (без секретів) |
 | `GOOGLE_CALENDAR_TIMEZONE` | дефолт `Europe/Kyiv` |

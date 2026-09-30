@@ -6,14 +6,16 @@ from pathlib import Path
 
 from agents.calendar_agent import CalendarAgent
 from agents.gmail_agent import GmailAgent
+from agents.notes_agent import NotesAgent
 from agents.pending_store import PendingStore
 from auth.account_manager import AccountManager
 from auth.google_oauth import GoogleIdentity, GoogleOAuthClient, OAuthError, granted_scopes
-from auth.scopes import CALENDAR_SCOPES, GMAIL_SCOPES, IDENTITY_SCOPES
+from auth.scopes import CALENDAR_SCOPES, GMAIL_SCOPES, IDENTITY_SCOPES, NOTES_SCOPES
 from auth.token_store import InMemoryTokenStore
 from google.oauth2.credentials import Credentials
 from integrations.google_calendar import FakeCalendarClient
 from integrations.google_gmail import FakeGmailClient
+from integrations.google_notes import FakeNotesClient
 from router.agent_router import AgentRouter
 
 
@@ -139,6 +141,7 @@ def build_test_router(
     *,
     calendar: FakeCalendarClient | None = None,
     gmail: FakeGmailClient | None = None,
+    notes: FakeNotesClient | None = None,
     seed_user: GoogleIdentity | None = None,
     scopes: list[str] | None = None,
     shared_device: bool = False,
@@ -163,12 +166,19 @@ def build_test_router(
 
     cal = calendar or FakeCalendarClient()
     mail = gmail or FakeGmailClient()
+    notes_client = notes or FakeNotesClient()
     pending = PendingStore(ttl_seconds=300)
     cal_agent = CalendarAgent(accounts, pending, timezone="Europe/Kyiv", client_factory=lambda _c: cal)
     mail_agent = GmailAgent(accounts, pending, client_factory=lambda _c: mail)
-    router = AgentRouter(accounts, cal_agent, mail_agent, pending)
+    notes_agent = NotesAgent(
+        accounts, timezone="Europe/Kyiv", client_factory=lambda _c: notes_client
+    )
+    router = AgentRouter(accounts, cal_agent, mail_agent, pending, notes_agent)
+    # Attach fake for tests that need to inspect Drive/Docs state.
+    router._test_notes_client = notes_client  # type: ignore[attr-defined]
     return router, cal, mail, oauth, accounts
 
 
 CALENDAR_ONLY_SCOPES = list(IDENTITY_SCOPES + CALENDAR_SCOPES)
-FULL_SCOPES = list(IDENTITY_SCOPES + CALENDAR_SCOPES + GMAIL_SCOPES)
+FULL_SCOPES = list(IDENTITY_SCOPES + CALENDAR_SCOPES + GMAIL_SCOPES + NOTES_SCOPES)
+NOTES_ONLY_SCOPES = list(IDENTITY_SCOPES + NOTES_SCOPES)

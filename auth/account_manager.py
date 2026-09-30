@@ -18,6 +18,7 @@ from auth.scopes import (
     GMAIL_SCOPES,
     GMAIL_SEND_SCOPES,
     IDENTITY_SCOPES,
+    NOTES_SCOPES,
 )
 from auth.token_store import TokenStore
 
@@ -35,6 +36,7 @@ class AccountStatus:
     gmail_compose_ready: bool
     gmail_send_ready: bool
     gmail_ready: bool
+    notes_ready: bool = False
     granted_scopes: list[str] = field(default_factory=list)
     accounts: list[dict[str, str]] = field(default_factory=list)
     message: str = ""
@@ -157,6 +159,7 @@ class AccountManager:
                 gmail_compose_ready=False,
                 gmail_send_ready=False,
                 gmail_ready=False,
+                notes_ready=False,
                 granted_scopes=[],
                 accounts=accounts,
                 message=empty_msg,
@@ -179,6 +182,7 @@ class AccountManager:
                     gmail_compose_ready=False,
                     gmail_send_ready=False,
                     gmail_ready=False,
+                    notes_ready=False,
                     granted_scopes=[],
                     accounts=accounts,
                     message=str(exc),
@@ -191,6 +195,7 @@ class AccountManager:
             gmail_compose = bool(creds) and self._oauth.has_scopes(creds, GMAIL_COMPOSE_SCOPES)
             gmail_send = bool(creds) and self._oauth.has_scopes(creds, GMAIL_SEND_SCOPES)
             gmail_ready = gmail_ro and gmail_compose and gmail_send
+            notes_ready = bool(creds) and self._oauth.has_scopes(creds, NOTES_SCOPES)
             email = profile.get("email") or ""
             return AccountStatus(
                 connected=True,
@@ -202,13 +207,15 @@ class AccountManager:
                 gmail_compose_ready=gmail_compose,
                 gmail_send_ready=gmail_send,
                 gmail_ready=gmail_ready,
+                notes_ready=notes_ready,
                 granted_scopes=scopes,
                 accounts=accounts,
                 message=(
                     f"Підключено {email or 'акаунт'}. "
                     f"Календар: {'так' if calendar_ready else 'ні'}. "
                     f"Gmail читання: {'так' if gmail_ro else 'ні'}. "
-                    f"Gmail надсилання: {'так' if gmail_send else 'ні'}."
+                    f"Gmail надсилання: {'так' if gmail_send else 'ні'}. "
+                    f"Нотатки: {'так' if notes_ready else 'ні'}."
                 ),
                 session_locked=False,
             )
@@ -287,6 +294,34 @@ class AccountManager:
             st.last_auth_ok = True
             return AuthAttemptResult(ok=True, status=st, message=st.message)
 
+    def request_notes_permission(self) -> AuthAttemptResult:
+        with self._lock:
+            if not self._active_sub:
+                raise OAuthError("not_connected", "Спочатку підключіть Google-акаунт через браузер.")
+            try:
+                identity, _ = self._oauth.request_scopes(self._active_sub, NOTES_SCOPES)
+            except OAuthError as exc:
+                st = self.status()
+                st.last_auth_ok = False
+                st.message = str(exc)
+                return AuthAttemptResult(ok=False, status=st, message=st.message)
+            self._profiles[identity.sub] = {"email": identity.email, "name": identity.name}
+            self._session_touch()
+            self._save_state()
+            st = self.status()
+            st.last_auth_ok = True
+            if st.notes_ready:
+                st.message = (
+                    "Дозвіл на нотатки Google Drive надано (permission_granted). "
+                    "Можна одразу записувати й читати нотатки — повторна авторизація не потрібна."
+                )
+            logger.info(
+                "google.permission.granted sub=%s… notes_ready=%s",
+                identity.sub[:8],
+                st.notes_ready,
+            )
+            return AuthAttemptResult(ok=True, status=st, message=st.message)
+
     def disconnect(self, google_sub: str | None = None) -> AccountStatus:
         with self._lock:
             target = google_sub or self._active_sub
@@ -332,6 +367,7 @@ class AccountManager:
         gmail_readonly: bool = False,
         gmail_compose: bool = False,
         gmail_send: bool = False,
+        notes: bool = False,
     ) -> tuple[str, Credentials]:
         """Credentials for the trusted active session only — ignores any LLM-supplied identity."""
         with self._lock:
@@ -348,6 +384,8 @@ class AccountManager:
                     required.extend(GMAIL_COMPOSE_SCOPES)
                 if gmail_send:
                     required.extend(GMAIL_SEND_SCOPES)
+            if notes:
+                required.extend(NOTES_SCOPES)
             credentials = self._oauth.require_scopes(sub, required)
             return sub, credentials
 

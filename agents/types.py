@@ -51,6 +51,8 @@ def result_from_google_error(exc: Exception) -> AgentResult:
 
     if isinstance(exc, GoogleApiError):
         data = {"google_error": exc.code, "http_status": exc.http_status}
+        if exc.code == "api_disabled":
+            return AgentResult("error", str(exc), data)
         if exc.http_status == 401 or exc.code in ("unauthorized", "auth_revoked"):
             return AgentResult("auth_required", str(exc), data)
         if exc.http_status == 403 or exc.code == "forbidden":

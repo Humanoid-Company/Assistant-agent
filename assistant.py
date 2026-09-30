@@ -45,6 +45,13 @@ from config import (
     SYSTEM_PROMPT,
     TRIGGER_PHRASES,
     VOICE_ENGINE,
+    WEB_SEARCH_API_KEY,
+    WEB_SEARCH_MAX_CALLS_PER_TURN,
+    WEB_SEARCH_TIMEOUT_S,
+)
+from integrations.web_search import (
+    WebSearchRateLimiter,
+    search_web,
 )
 from prompts.backend_prompt import build_backend_prompt
 from prompts.live_prompt import build_live_prompt
@@ -56,6 +63,7 @@ from text_to_speech import TextToSpeech
 from tools.calendar_tools import CalendarToolWrappers
 from tools.executor import ToolExecutionContext, ToolExecutor
 from tools.gmail_tools import GmailToolWrappers
+from tools.notes_tools import NotesToolWrappers
 from tools.results import ToolResult, agent_result_to_tool_result
 from tools.task_context import TaskRevisionTracker
 from voice.factory import normalize_voice_engine
@@ -170,6 +178,26 @@ def _gmail_kwargs(args: dict) -> dict:
     return out
 
 
+def _notes_kwargs(args: dict) -> dict:
+    keys = (
+        "action",
+        "content",
+        "title",
+        "category",
+        "query",
+        "target",
+        "note_id",
+        "append_text",
+        "limit",
+        "date_filter",
+        "date",
+    )
+    out = {k: args[k] for k in keys if k in args and args[k] is not None}
+    if "action" in out:
+        out["action"] = str(out["action"]).strip().lower()
+    return out
+
+
 def _sanitize_name(raw: str) -> str:
     """Validate/clean a candidate name from a tool-call argument.
 
@@ -265,7 +293,8 @@ TOOLS: list[dict] = [
         "name": "google_account",
         "description": (
             "Керування Google-акаунтом через браузерний OAuth: connect, status, disconnect, "
-            "grant_gmail (incremental дозвіл Gmail), reauth_switch (зміна акаунта ТІЛЬКИ через "
+            "grant_gmail (incremental дозвіл Gmail), grant_notes (дозвіл Google Drive для нотаток), "
+            "reauth_switch (зміна акаунта ТІЛЬКИ через "
             "браузерний вибір — НЕ за названим email), lock_session (скинути активну сесію на "
             "спільному ПК/роботі). Голос/email НЕ є доказом особи."
         ),
@@ -279,6 +308,7 @@ TOOLS: list[dict] = [
                         "status",
                         "disconnect",
                         "grant_gmail",
+                        "grant_notes",
                         "reauth_switch",
                         "lock_session",
                     ],
@@ -395,10 +425,42 @@ TOOLS: list[dict] = [
     },
     {
         "type": "function",
+        "name": "notes_action",
+        "description": (
+            "Особисті нотатки в Google Docs («Нотатки від агента»): "
+            "add / read / search / count / update / append / delete. "
+            "add — нова нотатка; update/append/delete — існуюча (краще note_id з search/read). "
+            "Не вигадуй note_id. Не озвучуй note_id. "
+            "Якщо кілька схожих — status=ambiguous, уточни. "
+            "Не використовуй add, коли користувач просить змінити існуючу."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["add", "read", "search", "count", "update", "append", "delete"],
+                },
+                "content": {"type": "string"},
+                "title": {"type": "string"},
+                "category": {"type": "string"},
+                "query": {"type": "string"},
+                "target": {"type": "string"},
+                "note_id": {"type": "string"},
+                "append_text": {"type": "string"},
+                "limit": {"type": "integer"},
+                "date_filter": {"type": "string", "enum": ["today", "yesterday"]},
+                "date": {"type": "string"},
+            },
+            "required": ["action"],
+        },
+    },
+    {
+        "type": "function",
         "name": "dispatch_task",
         "description": (
-            "Вільний текст завдання до локального Agent Router (календар/пошта/Google-акаунт). "
-            "Краще використовуй calendar_action / gmail_action / google_account з полями. "
+            "Вільний текст завдання до локального Agent Router (календар/пошта/нотатки/Google-акаунт). "
+            "Краще використовуй calendar_action / gmail_action / notes_action / google_account з полями. "
             "Підходить для короткого 'так'/'ні' після confirmation_required і для "
             f"категорій: {ROUTER_TASK_CATEGORIES}. Не вигадуй деталей."
         ),
@@ -408,6 +470,25 @@ TOOLS: list[dict] = [
                 "task": {"type": "string", "description": "Завдання своїми словами."},
             },
             "required": ["task"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "web_search",
+        "description": (
+            "Пошук у відкритому інтернеті актуальних фактів, новин, версій ПЗ, продуктів. "
+            "Не для перекладу/творчого письма і не для Gmail/Календаря/нотаток. "
+            "recency_days — обмежити приблизно останніми N днями (1 = сьогодні/latest). "
+            "Не зачитуй URL користувачу, якщо він сам не просить джерело."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "max_results": {"type": "integer"},
+                "recency_days": {"type": "integer"},
+            },
+            "required": ["query"],
         },
     },
     {
@@ -604,6 +685,7 @@ class Assistant:
             timezone=GOOGLE_CALENDAR_TIMEZONE,
         )
         self._task_revisions = TaskRevisionTracker()
+        self._web_search_limiter = WebSearchRateLimiter(max_per_turn=WEB_SEARCH_MAX_CALLS_PER_TURN)
         self._tool_executor = self._build_tool_executor()
 
         # Proactive connectivity monitoring — alerts only on real API/network errors,
@@ -613,7 +695,13 @@ class Assistant:
     def _build_tool_executor(self) -> ToolExecutor:
         calendar = CalendarToolWrappers(self.router.calendar_action)
         gmail = GmailToolWrappers(self.router.gmail_action)
-        executor = ToolExecutor(calendar=calendar, gmail=gmail, revisions=self._task_revisions)
+        notes = NotesToolWrappers(self.router.notes_action)
+        executor = ToolExecutor(
+            calendar=calendar,
+            gmail=gmail,
+            notes=notes,
+            revisions=self._task_revisions,
+        )
         # Fast local memory/state updates can stay on the Live loop.
         executor.register("set_assistant_name", self._live_set_name, run_in_thread=False)
         executor.register("change_voice", self._live_change_voice, run_in_thread=False)
@@ -623,6 +711,7 @@ class Assistant:
         executor.register("check_connection", self._live_check_connection, run_in_thread=True)
         executor.register("control_robot", self._live_control_robot, run_in_thread=True)
         executor.register("google_account", self._live_google_account, run_in_thread=True)
+        executor.register("web_search", self._live_web_search, run_in_thread=True)
         return executor
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -922,6 +1011,84 @@ class Assistant:
         del context
         return agent_result_to_tool_result(self._google_account(args))
 
+    def _live_web_search(self, args: dict, context: ToolExecutionContext) -> ToolResult:
+        return self._web_search_tool_result(
+            args,
+            session_id=context.session_id,
+            delegation_id=context.delegation_id,
+        )
+
+    def _web_search_tool_result(
+        self,
+        args: dict,
+        *,
+        session_id: str | None = None,
+        delegation_id: str | None = None,
+    ) -> ToolResult:
+        query = str(args.get("query") or "")
+        max_results = args.get("max_results")
+        recency_days = args.get("recency_days")
+        result = search_web(
+            query,
+            max_results=max_results if max_results is not None else 5,
+            recency_days=recency_days if recency_days is not None else None,
+            api_key=WEB_SEARCH_API_KEY,
+            timeout_s=WEB_SEARCH_TIMEOUT_S,
+            delegation_id=delegation_id,
+            session_id=session_id,
+            rate_limiter=self._web_search_limiter,
+        )
+        data = result.to_dict()
+        if result.error == "empty_query":
+            return ToolResult(
+                ok=False,
+                status="needs_more_info",
+                message="Порожній пошуковий запит — уточни, що саме шукати.",
+                data=data,
+            )
+        if result.error == "web_search_rate_limited":
+            return ToolResult(
+                ok=False,
+                status="rate_limited",
+                message="Забагато пошукових запитів підряд. Спершу озвуч те, що вже знайшов.",
+                data=data,
+            )
+        if result.error == "web_search_timeout":
+            return ToolResult(
+                ok=False,
+                status="error",
+                message="Пошук в інтернеті не встиг відповісти. Спробуй коротший запит або пізніше.",
+                data=data,
+            )
+        if result.error == "web_search_unavailable":
+            return ToolResult(
+                ok=False,
+                status="error",
+                message="Вебпошук зараз недоступний. Можу відповісти з того, що вже знаю, або спробуємо пізніше.",
+                data=data,
+            )
+        if not result.results:
+            return ToolResult(
+                ok=True,
+                status="ok",
+                message="За цим запитом надійних результатів не знайдено.",
+                data=data,
+            )
+        # Compact message for the model; structured hits live in data.results.
+        lines = []
+        for hit in result.results[:5]:
+            bit = hit.title or hit.source or hit.url
+            if hit.snippet:
+                bit = f"{bit}: {hit.snippet[:220]}"
+            lines.append(bit)
+        return ToolResult(
+            ok=True,
+            status="ok",
+            message="Знайдено результати пошуку. Коротко підсумуй користувачу; URL не зачитуй без прохання. "
+            + " | ".join(lines),
+            data=data,
+        )
+
     # ── Tool calls (assistant commands) ───────────────────────────────────────
 
     def _handle_tool_call(self, name: str, args: dict, call_id: str) -> str | None:
@@ -969,6 +1136,14 @@ class Assistant:
                 gmail_args["session_id"] = self._router_session_id
                 self._run_router_tool(call_id, lambda: self.router.gmail_action(**gmail_args))
                 return None
+            if name == "notes_action":
+                notes_args = _notes_kwargs(args)
+                notes_args["session_id"] = self._router_session_id
+                self._run_router_tool(call_id, lambda: self.router.notes_action(**notes_args))
+                return None
+            if name == "web_search":
+                self._run_web_search_realtime(call_id, args)
+                return None
             if name == "dispatch_task":
                 task = args.get("task", "").strip()
                 if not task:
@@ -984,6 +1159,53 @@ class Assistant:
         except Exception as exc:
             logger.error("Tool call %r failed: %s", name, exc, exc_info=True)
             return "Виникла помилка під час виконання команди."
+
+    def _run_web_search_realtime(self, call_id: str, args: dict) -> None:
+        """Realtime: return structured search JSON and let the model voice a short summary."""
+        rt = self.rt
+
+        def worker() -> None:
+            try:
+                tr = self._web_search_tool_result(
+                    args,
+                    session_id=self._router_session_id,
+                    delegation_id=None,
+                )
+                body = {
+                    "status": tr.status,
+                    "ok": tr.ok,
+                    "message": tr.message,
+                    "query": (tr.data or {}).get("query"),
+                    "results": (tr.data or {}).get("results") or [],
+                    "error": (tr.data or {}).get("error"),
+                }
+                output = json.dumps(body, ensure_ascii=False)
+                rt.submit_deferred_tool_result(
+                    call_id,
+                    output,
+                    trigger_followup=True,
+                    allow_tool_calls=False,
+                )
+            except Exception as exc:
+                logger.error("web_search failed: %s", type(exc).__name__, exc_info=True)
+                rt.submit_deferred_tool_result(
+                    call_id,
+                    json.dumps(
+                        {
+                            "status": "error",
+                            "ok": False,
+                            "message": "Вебпошук тимчасово недоступний.",
+                            "query": str(args.get("query") or ""),
+                            "results": [],
+                            "error": "web_search_unavailable",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    trigger_followup=True,
+                    allow_tool_calls=False,
+                )
+
+        threading.Thread(target=worker, daemon=True, name="web-search").start()
 
     def _user_utterances(self) -> list[str] | None:
         if self.rt is None:
@@ -1006,6 +1228,8 @@ class Assistant:
             return self.router.disconnect_google()
         if action == "grant_gmail":
             return self.router.grant_gmail()
+        if action == "grant_notes":
+            return self.router.grant_notes()
         if action in ("reauth_switch", "switch"):
             # "switch" kept as alias but always forces browser re-auth — never email lookup.
             return self.router.reauth_switch()
@@ -1013,7 +1237,8 @@ class Assistant:
             return self.router.lock_session()
         return AgentResult(
             "needs_more_info",
-            "Доступні дії: connect, status, disconnect, grant_gmail, reauth_switch, lock_session.",
+            "Доступні дії: connect, status, disconnect, grant_gmail, grant_notes, "
+            "reauth_switch, lock_session.",
         )
 
     def _run_router_tool(self, call_id: str, fn) -> None:

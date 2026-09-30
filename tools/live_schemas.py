@@ -193,10 +193,98 @@ LIVE_BACKEND_TOOLS: list[dict] = [
         {"op_id": _GMAIL_PROPS["op_id"]},
         required=["op_id"],
     ),
+    # Personal notes (Google Drive Doc "Нотатки від агента").
+    _fn(
+        "notes_add",
+        "Append a personal note to the user's Google Docs notes document. "
+        "Use when the user asks to запиши/занотуй/запам'ятай/збережи ідею as a persistent note "
+        "(not casual conversational memory). Preserve content faithfully. "
+        "Do NOT use for changing an existing note — use notes_update / notes_append.",
+        {
+            "content": {"type": "string", "description": "Exact note text to store"},
+            "title": {"type": "string", "description": "Short title (optional)"},
+            "category": {
+                "type": "string",
+                "description": "Optional category used as title if title omitted (Ідея, Покупки, …)",
+            },
+        },
+        required=["content"],
+    ),
+    _fn(
+        "notes_read",
+        "Read the latest personal notes from Google Docs. Use for «прочитай нотатки», "
+        "«останні нотатки», «які в мене нотатки». Returns structured notes with note_id "
+        "(never speak note_id aloud). Optional date_filter: today|yesterday.",
+        {
+            "limit": {"type": "integer", "description": "How many latest notes (default 10, max 50)"},
+            "date_filter": {
+                "type": "string",
+                "enum": ["today", "yesterday"],
+                "description": "Filter by local calendar day",
+            },
+            "date": {"type": "string", "description": "YYYY-MM-DD or DD.MM.YYYY"},
+        },
+    ),
+    _fn(
+        "notes_search",
+        "Search personal notes by keyword (case-insensitive). Use for «що я записував про…», "
+        "«знайди нотатку про…». Returns note_id for follow-up update/delete.",
+        {
+            "query": {"type": "string"},
+            "limit": {"type": "integer", "description": "Max matches (default 10)"},
+            "date_filter": {"type": "string", "enum": ["today", "yesterday"]},
+            "date": {"type": "string"},
+        },
+        required=["query"],
+    ),
+    _fn(
+        "notes_count",
+        "Return how many personal notes exist. Use for «скільки нотаток». Do not list them.",
+        {},
+    ),
+    _fn(
+        "notes_update",
+        "Update an existing note: replace content and/or rename title. "
+        "Prefer note_id from a prior notes_search/notes_read. "
+        "Or pass query/target like «остання», «про Лесика». "
+        "If several matches — tool returns ambiguous; ask which one.",
+        {
+            "note_id": {"type": "string", "description": "From prior search/read — never invent"},
+            "query": {"type": "string", "description": "Search text to locate note"},
+            "target": {
+                "type": "string",
+                "description": "Natural reference: остання / передостання / title fragment",
+            },
+            "content": {"type": "string", "description": "Replacement content (full replace)"},
+            "title": {"type": "string", "description": "New title (rename)"},
+        },
+    ),
+    _fn(
+        "notes_append",
+        "Append text to an existing note without removing prior content. "
+        "Prefer note_id from prior search/read. Use for «допиши до нотатки…».",
+        {
+            "note_id": {"type": "string"},
+            "query": {"type": "string"},
+            "target": {"type": "string"},
+            "append_text": {"type": "string", "description": "Text to append"},
+            "content": {"type": "string", "description": "Alias for append_text"},
+        },
+    ),
+    _fn(
+        "notes_delete",
+        "Delete one existing note block. Prefer note_id. "
+        "If ambiguous matches — do not guess; tool returns ambiguous.",
+        {
+            "note_id": {"type": "string"},
+            "query": {"type": "string"},
+            "target": {"type": "string"},
+        },
+    ),
     _fn(
         "google_account",
-        "Browser OAuth Google account: connect, status, disconnect, grant_gmail, reauth_switch, lock_session. "
-        "Voice/email is NOT identity proof.",
+        "Browser OAuth Google account: connect, status, disconnect, grant_gmail, grant_notes, "
+        "reauth_switch, lock_session. Voice/email is NOT identity proof.",
         {
             "action": {
                 "type": "string",
@@ -205,6 +293,7 @@ LIVE_BACKEND_TOOLS: list[dict] = [
                     "status",
                     "disconnect",
                     "grant_gmail",
+                    "grant_notes",
                     "reauth_switch",
                     "lock_session",
                 ],
@@ -212,6 +301,27 @@ LIVE_BACKEND_TOOLS: list[dict] = [
             "with_gmail": {"type": "boolean"},
         },
         required=["action"],
+    ),
+    _fn(
+        "web_search",
+        "Search the public web for current or externally verifiable information. "
+        "Use for recent events, news, current facts, software versions, companies, "
+        "products, technologies, or information that may have changed after the model's "
+        "knowledge cutoff. Do not use for translation, summarization, writing, calendar/"
+        "gmail/notes, or questions answerable without external lookup. "
+        "recency_days limits results to roughly the last N days (e.g. 1 for «сьогодні» / latest news).",
+        {
+            "query": {"type": "string", "description": "Search query"},
+            "max_results": {
+                "type": "integer",
+                "description": "How many results to return (default 5, hard max 10)",
+            },
+            "recency_days": {
+                "type": "integer",
+                "description": "Prefer results from the last N days (optional)",
+            },
+        },
+        required=["query"],
     ),
     _fn(
         "set_assistant_name",

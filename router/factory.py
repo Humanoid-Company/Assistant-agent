@@ -8,6 +8,7 @@ from pathlib import Path
 
 from agents.calendar_agent import CalendarAgent
 from agents.gmail_agent import GmailAgent
+from agents.notes_agent import NotesAgent
 from agents.pending_store import PendingStore
 from auth.account_manager import AccountManager
 from auth.google_oauth import GoogleOAuthClient
@@ -59,4 +60,5 @@ def build_agent_router(
     pending = PendingStore()
     calendar = CalendarAgent(accounts, pending, timezone=timezone)
     gmail = GmailAgent(accounts, pending)
-    return AgentRouter(accounts, calendar, gmail, pending)
+    notes = NotesAgent(accounts, timezone=timezone)
+    return AgentRouter(accounts, calendar, gmail, pending, notes)

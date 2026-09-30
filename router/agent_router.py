@@ -8,6 +8,7 @@ from typing import Any
 
 from agents.calendar_agent import CalendarAgent, calendar_call_problem
 from agents.gmail_agent import GmailAgent
+from agents.notes_agent import NotesAgent
 from agents.pending_store import PendingStore
 from agents.types import AgentResult
 from auth.account_manager import AccountManager
@@ -26,11 +27,13 @@ class AgentRouter:
         calendar: CalendarAgent,
         gmail: GmailAgent,
         pending: PendingStore,
+        notes: NotesAgent | None = None,
     ) -> None:
         self.accounts = accounts
         self.calendar = calendar
         self.gmail = gmail
         self.pending = pending
+        self.notes = notes or NotesAgent(accounts)
 
     def handle_text(self, text: str, *, session_id: str | None = None) -> AgentResult:
         """Free-text entry (dispatch_task compatibility). Prefer typed tools when possible."""
@@ -104,6 +107,18 @@ class AgentRouter:
             )
         ):
             return self.grant_gmail()
+        if any(
+            k in lower
+            for k in (
+                "дай доступ до нотаток",
+                "доступ до нотаток",
+                "дозвіл нотатки",
+                "підключи нотатки",
+                "grant notes",
+                "доступ до google drive",
+            )
+        ):
+            return self.grant_notes()
         if any(k in lower for k in ("відключи google", "вийди з google", "disconnect google")):
             return self.disconnect_google()
         if any(
@@ -120,6 +135,66 @@ class AgentRouter:
             return self.lock_session()
         if any(k in lower for k in ("статус google", "хто підключений", "google статус")):
             return self.google_status()
+
+        if any(
+            k in lower
+            for k in (
+                "запиши нотат",
+                "занотуй",
+                "запам'ятай",
+                "запам’ятай",
+                "додай до нотат",
+                "мої нотат",
+                "знайди нотат",
+                "що я записував",
+                "прочитай нотат",
+                "останні нотат",
+                "скільки нотат",
+                "видали нотат",
+                "зміни нотат",
+                "допиши",
+                "перейменуй нотат",
+            )
+        ):
+            if any(k in lower for k in ("скільки нотат", "скільки запис")):
+                return self.notes.handle("count")
+            if any(k in lower for k in ("видали", "прибери")):
+                q = re.sub(
+                    r".*?(видали|прибери)\s+(нотатку|запис)?\s*(про)?\s*",
+                    "",
+                    raw,
+                    count=1,
+                    flags=re.I,
+                ).strip(" ?.!")
+                return self.notes.handle("delete", target=q or "остання", query=q or None)
+            if any(k in lower for k in ("допиши", "доповни")):
+                return self.notes.handle(
+                    "append",
+                    target="остання" if "останн" in lower else None,
+                    query=raw,
+                    append_text=raw,
+                )
+            if any(k in lower for k in ("зміни", "відредагуй", "заміни", "перейменуй")):
+                return self.notes.handle("update", query=raw, target=raw, content=raw)
+            if any(k in lower for k in ("знайди", "що я записував", "чи я щось записував", "про ")):
+                q = re.sub(
+                    r".*?(знайди|записував про|про)\s+",
+                    "",
+                    raw,
+                    count=1,
+                    flags=re.I,
+                ).strip(" ?.!")
+                return self.notes.handle("search", query=q or raw)
+            if any(k in lower for k in ("прочитай", "останн", "які в мене", "список")):
+                return self.notes.handle("read", limit=5)
+            content = re.sub(
+                r"^(запиши нотатку|запиши ідею|занотуй|запам'ятай|запам’ятай|"
+                r"додай до моїх нотаток|збережи ідею)\s*:?\s*",
+                "",
+                raw,
+                flags=re.I,
+            ).strip()
+            return self.notes.handle("add", content=content or raw)
 
         if any(k in lower for k in ("лист", "пошт", "gmail", "email", "чернетк", "надішли", "напиши на")):
             if "знайди" in lower or "пошук" in lower or "шукай" in lower:
@@ -147,7 +222,7 @@ class AgentRouter:
 
         return AgentResult(
             "needs_more_info",
-            "Можу допомогти з Google Календарем і Gmail. Уточни завдання або підключи Google-акаунт.",
+            "Можу допомогти з Google Календарем, Gmail і нотатками. Уточни завдання або підключи Google-акаунт.",
         )
 
     def _confirm_pending(
@@ -202,6 +277,7 @@ class AgentRouter:
                 "sub": status.active_sub,
                 "calendar_ready": status.calendar_ready,
                 "gmail_ready": status.gmail_ready,
+                "notes_ready": status.notes_ready,
                 "granted_scopes": status.granted_scopes,
             },
         )
@@ -230,6 +306,30 @@ class AgentRouter:
             },
         )
 
+    def grant_notes(self) -> AgentResult:
+        try:
+            attempt = self.accounts.request_notes_permission()
+        except OAuthError as exc:
+            from agents.types import result_from_google_error
+
+            return result_from_google_error(exc)
+        if not attempt.ok:
+            return AgentResult(
+                "permission_denied",
+                attempt.message,
+                {"auth_ok": False, "notes_ready": attempt.status.notes_ready},
+            )
+        return AgentResult(
+            "success",
+            attempt.message,
+            {
+                "auth_ok": True,
+                "permission_granted": True,
+                "notes_ready": attempt.status.notes_ready,
+                "granted_scopes": attempt.status.granted_scopes,
+            },
+        )
+
     def reauth_switch(self) -> AgentResult:
         """Change account only via fresh browser OAuth — never by spoken email."""
         previous = None
@@ -241,6 +341,7 @@ class AgentRouter:
         if previous:
             self.calendar.clear_conversation_state(previous)
             self.pending.clear(previous)
+            self.notes.clear_cache(previous)
         if not attempt.ok:
             return AgentResult(
                 "permission_denied"
@@ -255,6 +356,7 @@ class AgentRouter:
             )
         if attempt.status.active_sub and attempt.status.active_sub != previous:
             self.calendar.clear_conversation_state(attempt.status.active_sub)
+            self.notes.clear_cache(attempt.status.active_sub)
         return AgentResult(
             "success",
             "Активний акаунт оновлено через браузер. " + attempt.message,
@@ -271,6 +373,7 @@ class AgentRouter:
         if previous:
             self.calendar.clear_conversation_state(previous)
             self.pending.clear(previous)
+            self.notes.clear_cache(previous)
         return AgentResult("success", status.message, {"session_locked": True, "connected": False})
 
     def disconnect_google(self) -> AgentResult:
@@ -283,6 +386,7 @@ class AgentRouter:
         if previous:
             self.calendar.clear_conversation_state(previous)
             self.pending.clear(previous)
+            self.notes.clear_cache(previous)
         return AgentResult("success", status.message)
 
     def google_status(self) -> AgentResult:
@@ -295,6 +399,7 @@ class AgentRouter:
             "gmail_compose_ready": status.gmail_compose_ready,
             "gmail_send_ready": status.gmail_send_ready,
             "gmail_ready": status.gmail_ready,
+            "notes_ready": status.notes_ready,
             "granted_scopes": status.granted_scopes,
             "accounts": status.accounts,
             "session_locked": status.session_locked,
@@ -338,6 +443,9 @@ class AgentRouter:
 
     def gmail_action(self, **kwargs: Any) -> AgentResult:
         return self.gmail.handle(**kwargs)
+
+    def notes_action(self, **kwargs: Any) -> AgentResult:
+        return self.notes.handle(**kwargs)
 
 
 def _asdict_safe(status: Any) -> dict[str, Any]:

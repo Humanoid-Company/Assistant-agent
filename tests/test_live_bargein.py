@@ -204,11 +204,18 @@ def test_calendar_gmail_wrappers_are_offloaded_by_default():
 
 
 def test_mic_send_loop_not_gated_on_playback():
+    """Mic must keep uploading during assistant playback (full-duplex).
+
+    Checking player.is_playing for *barge-in* is fine; gating append is not.
+    """
     live_src = Path(__file__).resolve().parents[1] / "voice" / "live_session.py"
     text = live_src.read_text(encoding="utf-8")
     send_section = text.split("async def _send_audio_loop")[1].split("async def _handle_event")[0]
-    assert "player.is_playing" not in send_section
+    assert "input_audio.append" in send_section
     assert "don't send microphone" not in send_section.lower()
+    # Must not skip append when playing:
+    assert "if self.player.is_playing:\n                continue" not in send_section
+    assert "if self.player.is_playing:\n                return" not in send_section
 
     tracker = PlaybackTracker(sample_rate=24000)
     tracker._stream = MagicMock()

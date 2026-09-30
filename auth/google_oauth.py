@@ -241,11 +241,14 @@ class GoogleOAuthClient:
             raise OAuthError("not_connected", "Google-акаунт ще не підключено.")
         missing = self.missing_scopes(credentials, required)
         if missing:
+            labels = scope_labels(missing)
             raise OAuthError(
                 "permission_required",
                 "Немає дозволу: "
-                + scope_labels(missing)
-                + ". Скажіть «дай доступ до Gmail» або «підключи Google з поштою», щоб відкрити браузер.",
+                + labels
+                + ". Скажіть «дай доступ до "
+                + labels
+                + "» або використайте google_account (grant_gmail / grant_notes), щоб відкрити браузер.",
                 missing_scopes=missing,
             )
         return credentials

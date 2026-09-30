@@ -9,7 +9,7 @@ import time
 import uuid
 from typing import Any, Callable, Optional
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, OpenAI
 
 from config import (
     OPENAI_API_KEY,
@@ -17,14 +17,31 @@ from config import (
     OPENAI_LIVE_BACKEND_MODEL,
     OPENAI_LIVE_MODEL,
     OPENAI_LIVE_VOICE,
+    TTS_MODEL,
+    TTS_VOICE,
+    VOICE_BARGE_IN_CONFIRM_MS,
+    VOICE_BARGE_IN_COOLDOWN_MS,
+    VOICE_BARGE_IN_DUCK_VOLUME,
+    VOICE_BARGE_IN_ENERGY_MARGIN,
+    VOICE_BARGE_IN_ENERGY_MARGIN_PLAYING,
+    VOICE_BARGE_IN_MIN_SPEECH_MS,
+    VOICE_BARGE_IN_ONSET_FRAMES,
+    VOICE_BARGE_IN_USE_ENERGY_GATE,
+    VOICE_BUSY_CUE_DELAY_MS,
+    VOICE_BUSY_CUE_MAX_PER_TURN,
+    VOICE_BUSY_CUE_SECOND_DELAY_MS,
+    VOICE_BUSY_CUES_ENABLED,
+    VOICE_LOCAL_BARGE_IN,
 )
 from tools.executor import ToolExecutionContext, ToolExecutor
+from voice.barge_in_gate import BargeInAction, BargeInGate
+from voice.busy_cues import BusyCueController
 from voice.delegation import extract_completed_function_call
+from voice.local_vad import LocalSpeechDetector
 from voice.playback import PlaybackTracker
 
 logger = logging.getLogger(__name__)
 
-_BARGE_IN_COOLDOWN_S = 0.75
 _SHUTDOWN_WAIT_S = 3.0
 
 
@@ -34,6 +51,24 @@ def _event_attr(obj: Any, name: str, default: Any = None) -> Any:
     if isinstance(obj, dict):
         return obj.get(name, default)
     return getattr(obj, name, default)
+
+
+def _synthesize_cue_pcm(text: str) -> Optional[bytes]:
+    """Local OpenAI TTS → raw PCM16 @ 24 kHz (no Live reasoning cycle)."""
+    if not text.strip():
+        return None
+    try:
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        response = client.audio.speech.create(
+            model=TTS_MODEL,
+            voice=TTS_VOICE,
+            input=text,
+            response_format="pcm",
+        )
+        return response.content
+    except Exception:
+        logger.exception("BUSY_CUE TTS failed")
+        return None
 
 
 class LiveVoiceSession:
@@ -49,6 +84,7 @@ class LiveVoiceSession:
         audio_rate: int | None = None,
         on_user_transcript: Callable[[str], None] | None = None,
         session_id: str | None = None,
+        cue_synthesize: Callable[[str], Optional[bytes]] | None = None,
     ) -> None:
         self._executor = tool_executor
         self._voice = voice or OPENAI_LIVE_VOICE
@@ -83,6 +119,42 @@ class LiveVoiceSession:
         self._last_barge_in_at = 0.0
         self._close_sent = False
         self._session_closing = False
+
+        # Local fast barge-in: two-stage gate (duck → confirm). Not VAD-alone cancel.
+        self._local_barge_in = VOICE_LOCAL_BARGE_IN
+        self._barge_cooldown_s = max(0.05, VOICE_BARGE_IN_COOLDOWN_MS / 1000.0)
+        self._vad = LocalSpeechDetector(
+            sample_rate=self._audio_rate,
+            onset_frames=VOICE_BARGE_IN_ONSET_FRAMES,
+        )
+        self._barge_gate = BargeInGate(
+            vad=self._vad,
+            confirm_ms=VOICE_BARGE_IN_CONFIRM_MS,
+            min_speech_ms=VOICE_BARGE_IN_MIN_SPEECH_MS,
+            duck_volume=VOICE_BARGE_IN_DUCK_VOLUME,
+            use_energy_gate=VOICE_BARGE_IN_USE_ENERGY_GATE,
+            energy_margin=VOICE_BARGE_IN_ENERGY_MARGIN,
+            energy_margin_playing=VOICE_BARGE_IN_ENERGY_MARGIN_PLAYING,
+        )
+        self._speech_onset_mono: float | None = None
+        self._duck_volume = VOICE_BARGE_IN_DUCK_VOLUME
+        # Response-aware output gate (not just SUPPRESS_MS time window).
+        self._assistant_generation = 0
+        self._play_assistant_audio = True
+        self._awaiting_output_gap = False
+        self._last_output_delta_at = 0.0
+        self._output_gap_ms = 220.0
+        self._stale_response = False
+
+        synth = cue_synthesize or _synthesize_cue_pcm
+        self._busy_cues = BusyCueController(
+            play_cue=self._play_busy_cue,
+            synthesize=synth,
+            enabled=VOICE_BUSY_CUES_ENABLED,
+            first_delay_ms=VOICE_BUSY_CUE_DELAY_MS,
+            second_delay_ms=VOICE_BUSY_CUE_SECOND_DELAY_MS,
+            max_per_turn=VOICE_BUSY_CUE_MAX_PER_TURN,
+        )
 
     @property
     def sleep_requested(self) -> bool:
@@ -125,11 +197,20 @@ class LiveVoiceSession:
             raise TimeoutError("GPT-Live session.started timed out")
         if self._error is not None:
             raise RuntimeError(f"GPT-Live failed to start: {self._error}") from self._error
+        # Preload busy-cue PCM off the voice path (best-effort).
+        if self._busy_cues.enabled:
+            threading.Thread(
+                target=self._busy_cues.preload,
+                daemon=True,
+                name="busy-cue-preload",
+            ).start()
         logger.info(
-            "live.session.started session_id=%s model=%s backend=%s",
+            "live.session.started session_id=%s model=%s backend=%s local_barge_in=%s busy_cues=%s",
             self.session_id,
             self._live_model,
             self._backend_model,
+            self._local_barge_in,
+            self._busy_cues.enabled,
         )
 
     def run_until_idle(self) -> None:
@@ -150,11 +231,13 @@ class LiveVoiceSession:
 
     def stop_playback(self) -> None:
         self.player.interrupt()
+        self._busy_cues.cancel(reason="stop_playback")
 
     def close(self) -> None:
         """Graceful close — do not wait forever for OAuth/browser worker threads."""
         self._sleep_requested = True
         self._session_closing = True
+        self._busy_cues.cancel(reason="session_close")
         loop = self._loop
         if loop is not None and loop.is_running():
             fut = asyncio.run_coroutine_threadsafe(self._shutdown(), loop)
@@ -282,6 +365,11 @@ class LiveVoiceSession:
             if not chunk or self._connection is None:
                 await asyncio.sleep(0.01)
                 continue
+
+            # Two-stage local barge-in (duck → confirm). Do not wait for full STT.
+            if self._local_barge_in:
+                self._maybe_local_barge_in(chunk)
+
             data = pending + chunk
             complete = len(data) - (len(data) % 2)
             pending = data[complete:]
@@ -295,6 +383,165 @@ class LiveVoiceSession:
                     logger.warning("live.error input_audio.append: %s", type(exc).__name__)
                     await asyncio.sleep(0.05)
 
+    def _maybe_local_barge_in(self, chunk: bytes) -> None:
+        playing = self.player.is_playing or self._busy_cues.cue_playing
+        now = time.monotonic()
+        self._maybe_release_output_after_gap(now)
+
+        decision = self._barge_gate.feed_mic(chunk, assistant_or_cue_playing=playing)
+
+        if decision.action == BargeInAction.DUCK:
+            self._speech_onset_mono = now
+            self.player.set_volume(self._duck_volume)
+            return
+
+        if decision.action == BargeInAction.REJECT:
+            self.player.set_volume(1.0)
+            self._speech_onset_mono = None
+            return
+
+        if decision.action == BargeInAction.CONFIRM:
+            if now - self._last_barge_in_at < self._barge_cooldown_s:
+                self.player.set_volume(1.0)
+                return
+            self._trigger_barge_in(
+                source="vad_confirmed",
+                speech_ms=decision.speech_ms,
+                reason=decision.reason,
+            )
+
+    def _invalidate_assistant_response(self, *, reason: str) -> None:
+        """Hard-stop: old generation must never become audible again."""
+        self._assistant_generation += 1
+        self._play_assistant_audio = False
+        self._awaiting_output_gap = True
+        self._stale_response = True
+        self._last_output_delta_at = time.monotonic()
+        self.player.interrupt()
+        self.player.set_volume(1.0)
+        self._busy_cues.on_user_speech()
+        logger.info(
+            "RESPONSE invalidated generation=%s reason=%s",
+            self._assistant_generation,
+            reason,
+        )
+
+    def _maybe_release_output_after_gap(self, now: float | None = None) -> None:
+        """After barge-in, allow NEW audio only once the old stream goes quiet."""
+        if not self._awaiting_output_gap or self._play_assistant_audio:
+            return
+        now = now if now is not None else time.monotonic()
+        if self._last_output_delta_at <= 0:
+            self._last_output_delta_at = now
+            return
+        gap_ms = (now - self._last_output_delta_at) * 1000.0
+        if gap_ms >= self._output_gap_ms:
+            self._play_assistant_audio = True
+            self._awaiting_output_gap = False
+            self._stale_response = False
+            logger.info(
+                "RESPONSE new_generation generation=%s gap_ms=%.0f",
+                self._assistant_generation,
+                gap_ms,
+            )
+
+    def _trigger_barge_in(
+        self,
+        *,
+        source: str,
+        speech_ms: float = 0.0,
+        reason: str = "",
+        short_ack: bool = False,
+    ) -> None:
+        now = time.monotonic()
+        if now - self._last_barge_in_at < self._barge_cooldown_s:
+            return
+        onset = self._speech_onset_mono or now
+        latency_ms = max(0, int((now - onset) * 1000))
+        logger.info("BARGE_IN detected source=%s reason=%s", source, reason or source)
+        self._invalidate_assistant_response(reason=source)
+        self._last_barge_in_at = now
+        self._barge_gate.reset()
+        # Interrupt keywords → steer to short ack only; else just stop & listen.
+        is_interrupt_cmd = short_ack or source in (
+            "transcript_keyword",
+            "partial_transcript",
+            "transcript",
+        ) or reason in ("transcript", "partial_transcript_hint", "transcript_keyword")
+        self._schedule_steer_stop(short_ack=is_interrupt_cmd)
+        logger.info(
+            "BARGE_IN playback_stopped latency_ms=%s barge_in_latency_ms=%s "
+            "speech_ms=%.0f source=%s generation=%s candidates=%s confirmed=%s rejected=%s",
+            latency_ms,
+            latency_ms,
+            speech_ms,
+            source,
+            self._assistant_generation,
+            self._barge_gate.candidate_count,
+            self._barge_gate.confirmed_count,
+            self._barge_gate.rejected_count,
+        )
+        self._speech_onset_mono = None
+
+    def _schedule_steer_stop(self, *, short_ack: bool = False) -> None:
+        if self._connection is None or self._session_closing:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._steer_stop_speaking(short_ack=short_ack))
+            return
+        except RuntimeError:
+            pass
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                self._steer_stop_speaking(short_ack=short_ack), loop
+            )
+
+    async def _steer_stop_speaking(self, *, short_ack: bool = False) -> None:
+        """Ask Live to stop; local epoch already dropped old audio."""
+        if self._connection is None or self._session_closing:
+            return
+        if short_ack:
+            content = (
+                "Stop your previous answer immediately. Do not continue or resume it. "
+                "Reply with at most one short acknowledgement such as «Добре.» or "
+                "«Так, чекаю.» Then wait silently for the user."
+            )
+        else:
+            content = (
+                "Stop speaking immediately. The user is talking. "
+                "Do not finish or resume your previous sentence. Listen."
+            )
+        try:
+            await self._connection.session.instructions.append(
+                content=content,
+                delegation_id=None,
+                event_id=f"barge_{uuid.uuid4().hex[:8]}",
+            )
+            logger.info(
+                "BARGE_IN response_cancelled method=instructions.append short_ack=%s "
+                "generation=%s",
+                short_ack,
+                self._assistant_generation,
+            )
+        except Exception:
+            logger.debug("BARGE_IN steer_stop failed", exc_info=True)
+
+    def _output_accepted(self) -> bool:
+        """Response-aware gate: stale generation never plays, even after time passes."""
+        self._maybe_release_output_after_gap()
+        return self._play_assistant_audio
+
+    async def _play_busy_cue(self, phrase: str, pcm: bytes) -> None:
+        if not self._output_accepted() or self._vad.speaking or self._stale_response:
+            logger.info("BUSY_CUE cancelled reason=user_speech phrase=%r", phrase)
+            return
+        if self.player.is_playing and self.player.playing_kind == "assistant":
+            logger.info("BUSY_CUE skipped reason=assistant_playing")
+            return
+        self.player.enqueue(pcm, kind="cue")
+
     async def _handle_event(self, event: Any) -> None:
         etype = _event_attr(event, "type")
         if etype == "session.started":
@@ -305,25 +552,79 @@ class LiveVoiceSession:
             self._started.set()
             return
         if etype == "session.output_audio.delta":
+            now = time.monotonic()
+            if not self._output_accepted():
+                self._last_output_delta_at = now
+                logger.info(
+                    "RESPONSE stale_delta_dropped generation=%s",
+                    self._assistant_generation,
+                )
+                return
+            # Final/assistant audio must not overlap a thinking cue.
+            if self.player.playing_kind == "cue" or self._busy_cues.cue_playing:
+                self._busy_cues.on_final_response_starting()
+                self.player.interrupt()
             delta = _event_attr(event, "delta") or ""
             try:
                 pcm = base64.b64decode(delta)
             except Exception:
                 return
-            self.player.enqueue(pcm)
+            self._last_output_delta_at = now
+            self.player.enqueue(pcm, kind="assistant")
             return
         if etype == "session.input_transcript.delta":
             frag = _event_attr(event, "delta") or ""
-            # Local barge-in: WebSocket Live does not auto-stop our PCM speaker queue.
-            if isinstance(frag, str) and frag.strip() and self.player.is_playing:
-                now = time.monotonic()
-                if now - self._last_barge_in_at >= _BARGE_IN_COOLDOWN_S:
-                    self.player.interrupt()
-                    self._last_barge_in_at = now
-                    logger.info(
-                        "live.barge_in session_id=%s source=input_transcript",
-                        self.session_id,
-                    )
+            if isinstance(frag, str) and frag.strip():
+                playing = self.player.is_playing or self._busy_cues.cue_playing or self._stale_response
+                if playing or self._barge_gate.state.value == "possible_barge_in":
+                    decision = self._barge_gate.note_partial_transcript(frag)
+                    if decision.action == BargeInAction.CONFIRM:
+                        self._speech_onset_mono = self._speech_onset_mono or time.monotonic()
+                        low = frag.strip().lower()
+                        short = any(
+                            h in low
+                            for h in (
+                                "стоп",
+                                "зачекай",
+                                "почекай",
+                                "тихо",
+                                "досить",
+                                "не треба",
+                                "секунду",
+                            )
+                        )
+                        self._trigger_barge_in(
+                            source="transcript",
+                            speech_ms=decision.speech_ms,
+                            reason=decision.reason,
+                            short_ack=short,
+                        )
+                    elif (
+                        decision.action == BargeInAction.NONE
+                        and self._barge_gate.state.value == "idle"
+                        and (self.player.is_playing or self._stale_response)
+                    ):
+                        low = frag.strip().lower()
+                        if any(
+                            h in low
+                            for h in (
+                                "стоп",
+                                "зачекай",
+                                "почекай",
+                                "тихо",
+                                "досить",
+                                "не треба",
+                            )
+                        ):
+                            self._speech_onset_mono = self._speech_onset_mono or time.monotonic()
+                            forced = self._barge_gate.force_confirm(source="transcript_keyword")
+                            if forced.action == BargeInAction.CONFIRM:
+                                self._trigger_barge_in(
+                                    source="transcript_keyword",
+                                    speech_ms=forced.speech_ms,
+                                    reason="transcript",
+                                    short_ack=True,
+                                )
             self._input_buf += frag
             if self._on_user_transcript:
                 try:
@@ -332,6 +633,10 @@ class LiveVoiceSession:
                     logger.exception("user transcript callback failed")
             return
         if etype == "session.output_transcript.delta":
+            # Stale response text must not accumulate into the next turn context.
+            if self._stale_response or not self._play_assistant_audio:
+                self._last_output_delta_at = time.monotonic()
+                return
             frag = _event_attr(event, "delta") or ""
             self._output_buf += frag
             return
@@ -397,6 +702,7 @@ class LiveVoiceSession:
                 completed.call_id,
                 completed.name,
             )
+            self._busy_cues.on_tool_started()
             # Do NOT await on the recv loop — blocking tools must not freeze mic/events.
             task = asyncio.create_task(
                 self._execute_and_continue(
@@ -435,6 +741,7 @@ class LiveVoiceSession:
         response_id: str | None,
     ) -> None:
         if self._connection is None:
+            self._busy_cues.on_tool_finished()
             return
         ctx = ToolExecutionContext(
             session_id=self.session_id,
@@ -445,6 +752,7 @@ class LiveVoiceSession:
             or None,
         )
         result = await self._executor.execute(name, arguments, ctx)
+        self._busy_cues.on_tool_finished()
         # Session may have closed while a blocking OAuth/Google call ran in a worker thread.
         if self._session_closing or self._closed.is_set() or self._connection is None:
             logger.info(
@@ -491,6 +799,10 @@ class LiveVoiceSession:
                 return
         if self._session_closing or self._closed.is_set() or self._connection is None:
             return
+        # Cancel any lingering cue before the spoken continuation.
+        self._busy_cues.on_final_response_starting()
+        if self.player.playing_kind == "cue":
+            self.player.interrupt()
         await self._connection.response.create(event_id=f"continue_{call_id}")
         logger.info(
             "live.backend.response_continued session_id=%s delegation_id=%s call_id=%s",
@@ -509,6 +821,12 @@ class LiveVoiceSession:
     async def _speak_context(self, text: str) -> None:
         if self._connection is None:
             return
+        # Explicit local speak — allow a fresh generation after any barge-in.
+        self._assistant_generation += 1
+        self._play_assistant_audio = True
+        self._awaiting_output_gap = False
+        self._stale_response = False
+        logger.info("RESPONSE new_generation generation=%s reason=speak_context", self._assistant_generation)
         await self._connection.session.commentary.append(
             content=text, delegation_id=None, event_id=f"comment_{uuid.uuid4().hex[:8]}"
         )
@@ -516,6 +834,7 @@ class LiveVoiceSession:
     async def _shutdown(self) -> None:
         self._session_closing = True
         self._sleep_requested = True
+        self._busy_cues.cancel(reason="shutdown")
         for task in list(self._tool_tasks):
             if not task.done():
                 task.cancel()

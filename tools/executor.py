@@ -11,6 +11,7 @@ from typing import Any, Callable
 from agents.types import AgentResult
 from tools.calendar_tools import CalendarToolWrappers
 from tools.gmail_tools import GmailToolWrappers
+from tools.notes_tools import NotesToolWrappers
 from tools.results import ToolResult, agent_result_to_tool_result
 from tools.task_context import TaskRevisionTracker
 
@@ -36,8 +37,8 @@ _CONFIRM_TOOLS = frozenset(
     }
 )
 
-# Built-in calendar/gmail wrappers always use blocking Google HTTP clients.
-_ALWAYS_THREADED_PREFIXES = ("calendar_", "gmail_")
+# Built-in calendar/gmail/notes wrappers always use blocking Google HTTP clients.
+_ALWAYS_THREADED_PREFIXES = ("calendar_", "gmail_", "notes_")
 
 
 @dataclass
@@ -63,11 +64,13 @@ class ToolExecutor:
         *,
         calendar: CalendarToolWrappers,
         gmail: GmailToolWrappers | None = None,
+        notes: NotesToolWrappers | None = None,
         revisions: TaskRevisionTracker | None = None,
         handlers: dict[str, HandlerFn | _HandlerSpec] | None = None,
     ) -> None:
         self._calendar = calendar
         self._gmail = gmail
+        self._notes = notes
         self._revisions = revisions or TaskRevisionTracker()
         self._handlers: dict[str, _HandlerSpec] = {}
         for name, handler in (handlers or {}).items():
@@ -252,6 +255,33 @@ class ToolExecutor:
             logger.info("live.tool.offloaded_to_thread tool_name=%s", name)
             try:
                 return await asyncio.to_thread(_gmail_call)
+            except KeyError:
+                return ToolResult(ok=False, status="error", message=f"Невідома команда: {name}")
+
+        if name.startswith("notes_"):
+            if self._notes is None:
+                return ToolResult(ok=False, status="error", message="Notes tools are not configured.")
+
+            def _notes_call() -> AgentResult:
+                if name == "notes_add":
+                    return self._notes.add_note(args, session_id=sid)
+                if name == "notes_read":
+                    return self._notes.read_notes(args, session_id=sid)
+                if name == "notes_search":
+                    return self._notes.search_notes(args, session_id=sid)
+                if name == "notes_count":
+                    return self._notes.count_notes(args, session_id=sid)
+                if name == "notes_update":
+                    return self._notes.update_note(args, session_id=sid)
+                if name == "notes_append":
+                    return self._notes.append_note(args, session_id=sid)
+                if name == "notes_delete":
+                    return self._notes.delete_note(args, session_id=sid)
+                raise KeyError(name)
+
+            logger.info("live.tool.offloaded_to_thread tool_name=%s", name)
+            try:
+                return await asyncio.to_thread(_notes_call)
             except KeyError:
                 return ToolResult(ok=False, status="error", message=f"Невідома команда: {name}")
 
