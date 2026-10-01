@@ -82,7 +82,7 @@ def _hear(session: LiveVoiceSession, text: str) -> None:
 
 def _steers(session: LiveVoiceSession) -> list[bool]:
     calls: list[bool] = []
-    session._schedule_steer_stop = lambda *, short_ack=False: calls.append(short_ack)  # type: ignore
+    session._schedule_steer_stop = lambda *, short_ack=False, **_: calls.append(short_ack)  # type: ignore
     return calls
 
 

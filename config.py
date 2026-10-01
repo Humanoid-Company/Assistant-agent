@@ -70,6 +70,9 @@ VOICE_BARGE_IN_CONFIRM_MS: int = int(os.getenv("VOICE_BARGE_IN_CONFIRM_MS", "120
 VOICE_BARGE_IN_MIN_SPEECH_MS: int = int(os.getenv("VOICE_BARGE_IN_MIN_SPEECH_MS", "600"))
 # Silence that ends a short candidate; long enough to span pauses between words.
 VOICE_BARGE_IN_REJECT_SILENCE_MS: int = int(os.getenv("VOICE_BARGE_IN_REJECT_SILENCE_MS", "300"))
+# While the assistant talks, a candidate must be this many times louder than the mic level
+# of its own voice from the speakers (no hardware echo cancellation on laptops/robots).
+VOICE_BARGE_IN_ECHO_MARGIN: float = float(os.getenv("VOICE_BARGE_IN_ECHO_MARGIN", "2.5"))
 # Duck only gently: a false candidate should be barely noticeable.
 VOICE_BARGE_IN_DUCK_VOLUME: float = float(os.getenv("VOICE_BARGE_IN_DUCK_VOLUME", "0.5"))
 VOICE_BARGE_IN_USE_ENERGY_GATE: bool = os.getenv(

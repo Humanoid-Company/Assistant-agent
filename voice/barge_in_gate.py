@@ -13,6 +13,9 @@ from voice.local_vad import LocalSpeechDetector, VadTick
 
 logger = logging.getLogger(__name__)
 
+# Echo level smoothing per 30 ms frame (~0.4 s time constant).
+_ECHO_ALPHA = 0.08
+
 
 class BargeInState(str, Enum):
     IDLE = "idle"
@@ -56,6 +59,9 @@ class BargeInGate:
         min_confirm_age_ms: int = 160,
         # Cough/clap-like bursts are dropped this fast, independent of the longer window.
         burst_reject_ms: int = 300,
+        # While the assistant talks, the mic also hears it from the speakers. A candidate must
+        # be this many times louder than that echo level to count as the user.
+        echo_margin: float = 2.5,
     ) -> None:
         self.vad = vad
         self.confirm_ms = max(100, confirm_ms)
@@ -67,6 +73,9 @@ class BargeInGate:
         self.reject_silence_ms = max(40, reject_silence_ms)
         self.min_confirm_age_ms = max(80, min_confirm_age_ms)
         self.burst_reject_ms = max(100, burst_reject_ms)
+        self.echo_margin = max(1.0, echo_margin)
+        # Running mic level while the assistant plays and nobody interrupts = speaker echo.
+        self._echo_rms = 0.0
 
         self.state = BargeInState.IDLE
         self._candidate_started: float | None = None
@@ -110,10 +119,17 @@ class BargeInGate:
         tick = self.vad.feed(pcm, update_ambient=update_ambient)
 
         if not assistant_or_cue_playing and self.state == BargeInState.IDLE:
+            self._echo_rms *= 0.8  # playback over -> echo fades out
             return BargeInDecision(state=self.state)
 
         if self.state == BargeInState.IDLE:
-            return self._maybe_start_candidate(tick, assistant_or_cue_playing)
+            decision = self._maybe_start_candidate(tick, assistant_or_cue_playing)
+            if self.state == BargeInState.IDLE and assistant_or_cue_playing:
+                # Learn the echo only from audio that did not open a candidate, so the user's
+                # own first syllables never raise the bar against them.
+                for rms in tick.frame_rms_list or ((tick.rms,) if tick.rms else ()):
+                    self._echo_rms += _ECHO_ALPHA * (rms - self._echo_rms)
+            return decision
 
         if self.state == BargeInState.POSSIBLE:
             return self._update_candidate(tick, assistant_or_cue_playing)
@@ -161,22 +177,20 @@ class BargeInGate:
     ) -> BargeInDecision:
         if not tick.onset:
             return BargeInDecision(state=self.state)
-        if self.use_energy_gate and not self.vad.energy_passes(
-            tick.rms,
-            margin=self.energy_margin,
-            playing_margin=self.energy_margin_playing,
-            assistant_playing=assistant_playing,
-        ):
+        too_quiet = self._energy_problem(tick.rms, assistant_playing)
+        if too_quiet:
             logger.info(
-                "BARGE_IN rejected reason=low_energy rms=%.0f ambient=%.0f",
+                "BARGE_IN rejected reason=%s rms=%.0f ambient=%.0f echo=%.0f",
+                too_quiet,
                 tick.rms,
                 tick.ambient_rms,
+                self._echo_rms,
             )
             self.rejected_count += 1
             return BargeInDecision(
                 action=BargeInAction.NONE,
                 state=BargeInState.IDLE,
-                reason="low_energy",
+                reason=too_quiet,
             )
         self.state = BargeInState.POSSIBLE
         self._candidate_started = time.monotonic()
@@ -211,12 +225,7 @@ class BargeInGate:
         started = self._candidate_started or now
         age_ms = (now - started) * 1000.0
 
-        energy_ok = (not self.use_energy_gate) or self.vad.energy_passes(
-            tick.rms,
-            margin=self.energy_margin,
-            playing_margin=self.energy_margin_playing,
-            assistant_playing=assistant_playing,
-        )
+        energy_ok = self._energy_problem(tick.rms, assistant_playing) is None
 
         if tick.frame_rms_list:
             self._rms_hist.extend(tick.frame_rms_list)
@@ -276,6 +285,21 @@ class BargeInGate:
             speech_ms=self._speech_ms,
             duration_ms=age_ms,
         )
+
+    def _energy_problem(self, rms: float, assistant_playing: bool) -> str | None:
+        """None if loud enough to be the user; else why not (low_energy / echo_level)."""
+        if not self.use_energy_gate:
+            return None
+        if not self.vad.energy_passes(
+            rms,
+            margin=self.energy_margin,
+            playing_margin=self.energy_margin_playing,
+            assistant_playing=assistant_playing,
+        ):
+            return "low_energy"
+        if assistant_playing and rms < self._echo_rms * self.echo_margin:
+            return "echo_level"
+        return None
 
     def _looks_like_non_speech_burst(self) -> bool:
         """High-energy simple burst (cough/clap) without speech-like modulation."""

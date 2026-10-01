@@ -93,6 +93,7 @@ Refresh tokens зберігаються в **OS keyring** (не в спільн�
 | `VOICE_BARGE_IN_CONFIRM_MS` | скільки чекати доказів наміру перебити після duck (default `1200`) |
 | `VOICE_BARGE_IN_MIN_SPEECH_MS` | перебивання лише за звуком, без транскрипції: стільки безперервної мови (default `600`) |
 | `VOICE_BARGE_IN_REJECT_SILENCE_MS` | тиша, що закриває короткий звук; покриває паузи між словами (default `300`) |
+| `VOICE_BARGE_IN_ECHO_MARGIN` | у скільки разів голос має бути гучнішим за ехо асистента з колонок, щоб перебити (default `2.5`) |
 | `VOICE_BUSY_CUES_ENABLED` | короткі «Угу.» під час довгих tools (default `true`) |
 | `REALTIME_SILENCE_MS` | пауза, що завершує репліку в realtime (default `600`); менше = швидша відповідь, але може обрізати |
 | `GOOGLE_HTTP_TIMEOUT_S` | таймаут одного запиту до Google API (default `15`) |

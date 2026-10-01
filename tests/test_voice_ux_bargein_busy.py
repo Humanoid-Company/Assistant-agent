@@ -258,7 +258,7 @@ def test_transcript_keyword_interrupts_and_requests_short_ack():
     session.player.enqueue(b"\x00\x01" * 400)
     steered = {}
 
-    async def fake_steer(*, short_ack=False):
+    async def fake_steer(*, short_ack=False, **_):
         steered["short_ack"] = short_ack
 
     session._steer_stop_speaking = fake_steer  # type: ignore
@@ -373,3 +373,51 @@ def test_no_release_while_the_user_is_still_talking():
     session._vad._speaking = True  # user still mid-sentence
     _stream_delta(session)
     assert session.player.queued_bytes == 0
+
+
+def _echo_gate() -> BargeInGate:
+    gate = _gate(use_energy_gate=True, energy_margin_playing=3.0)
+    gate.vad._ambient_rms = 12.0
+    # Assistant talking: the mic hears its voice from the speakers at ~200 rms.
+    gate.vad.feed = lambda pcm, update_ambient=True: VadTick(  # type: ignore
+        onset=False, speaking=True, speech_frame=True, rms=200, ambient_rms=12, frames_ms=300,
+        frame_rms_list=(200.0,) * 10, frame_zcr_list=(0.1,) * 10,
+    )
+    for _ in range(5):
+        gate.feed_mic(b"x", assistant_or_cue_playing=True)
+    return gate
+
+
+def _onset(gate: BargeInGate, rms: float):
+    gate.vad.feed = lambda pcm, update_ambient=True: VadTick(  # type: ignore
+        onset=True, speaking=True, speech_frame=True, rms=rms, ambient_rms=12, frames_ms=30,
+        frame_rms_list=(rms,), frame_zcr_list=(0.1,),
+    )
+    return gate.feed_mic(b"x", assistant_or_cue_playing=True)
+
+
+def test_own_voice_from_speakers_is_not_an_interruption():
+    """Real log: candidates at rms 182–215 while the assistant spoke (ambient 12) confirmed as
+    'sustained_speech' and cut the assistant off mid-answer."""
+    gate = _echo_gate()
+    decision = _onset(gate, 215)
+    assert decision.action == BargeInAction.NONE
+    assert decision.reason == "echo_level"
+
+
+def test_user_voice_over_the_echo_still_interrupts():
+    gate = _echo_gate()
+    assert _onset(gate, 1945).action == BargeInAction.DUCK
+
+
+def test_audio_only_barge_in_lets_the_model_resume_if_nobody_spoke():
+    session = _session()
+    sent = {}
+
+    class _Instructions:
+        async def append(self, *, content, **_):
+            sent["content"] = content
+
+    session._connection = type("C", (), {"session": type("S", (), {"instructions": _Instructions()})()})()
+    asyncio.run(session._steer_stop_speaking(uncertain=True))
+    assert "continue your previous answer" in sent["content"]

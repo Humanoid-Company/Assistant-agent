@@ -23,6 +23,7 @@ from config import (
     VOICE_BARGE_IN_CONFIRM_MS,
     VOICE_BARGE_IN_COOLDOWN_MS,
     VOICE_BARGE_IN_DUCK_VOLUME,
+    VOICE_BARGE_IN_ECHO_MARGIN,
     VOICE_BARGE_IN_ENERGY_MARGIN,
     VOICE_BARGE_IN_ENERGY_MARGIN_PLAYING,
     VOICE_BARGE_IN_MIN_SPEECH_MS,
@@ -146,6 +147,7 @@ class LiveVoiceSession:
             energy_margin=VOICE_BARGE_IN_ENERGY_MARGIN,
             energy_margin_playing=VOICE_BARGE_IN_ENERGY_MARGIN_PLAYING,
             reject_silence_ms=VOICE_BARGE_IN_REJECT_SILENCE_MS,
+            echo_margin=VOICE_BARGE_IN_ECHO_MARGIN,
         )
         self._speech_onset_mono: float | None = None
         self._duck_volume = VOICE_BARGE_IN_DUCK_VOLUME
@@ -539,8 +541,9 @@ class LiveVoiceSession:
         self._invalidate_assistant_response(reason=source)
         self._last_barge_in_at = now
         self._barge_gate.reset()
-        # Stop word → one short ack («Добре.»); user taking the turn → just stop and listen.
-        self._schedule_steer_stop(short_ack=short_ack)
+        # Stop word → one short ack («Добре.»); words → stop and listen; sound only (no words
+        # yet) → pause, and resume if it turns out nobody was talking to the assistant.
+        self._schedule_steer_stop(short_ack=short_ack, uncertain=source == "vad_confirmed")
         logger.info(
             "BARGE_IN playback_stopped latency_ms=%s barge_in_latency_ms=%s "
             "speech_ms=%.0f source=%s generation=%s candidates=%s confirmed=%s rejected=%s",
@@ -555,22 +558,22 @@ class LiveVoiceSession:
         )
         self._speech_onset_mono = None
 
-    def _schedule_steer_stop(self, *, short_ack: bool = False) -> None:
+    def _schedule_steer_stop(self, *, short_ack: bool = False, uncertain: bool = False) -> None:
         if self._connection is None or self._session_closing:
             return
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self._steer_stop_speaking(short_ack=short_ack))
+            loop.create_task(self._steer_stop_speaking(short_ack=short_ack, uncertain=uncertain))
             return
         except RuntimeError:
             pass
         loop = self._loop
         if loop is not None and loop.is_running():
             asyncio.run_coroutine_threadsafe(
-                self._steer_stop_speaking(short_ack=short_ack), loop
+                self._steer_stop_speaking(short_ack=short_ack, uncertain=uncertain), loop
             )
 
-    async def _steer_stop_speaking(self, *, short_ack: bool = False) -> None:
+    async def _steer_stop_speaking(self, *, short_ack: bool = False, uncertain: bool = False) -> None:
         """Ask Live to stop; local epoch already dropped old audio."""
         if self._connection is None or self._session_closing:
             return
@@ -579,6 +582,15 @@ class LiveVoiceSession:
                 "Stop your previous answer immediately. Do not continue or resume it. "
                 "Reply with at most one short acknowledgement such as «Добре.» or "
                 "«Так, чекаю.» Then wait silently for the user."
+            )
+        elif uncertain:
+            # Only a sound was detected, no words yet: a false alarm must not leave the
+            # assistant silent mid-answer.
+            content = (
+                "Pause — the user may be starting to talk. Listen. If they say something to "
+                "you, answer that. If nobody actually spoke to you (noise, a cough, your own "
+                "voice echoing), continue your previous answer from where you stopped, without "
+                "repeating it from the beginning."
             )
         else:
             content = (
