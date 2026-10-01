@@ -12,15 +12,72 @@ def test_oauth_success_connects_account(tmp_path):
     identity = GoogleIdentity(sub="sub-1", email="one@example.com", name="One")
     oauth = FakeOAuth(store, {identity.sub: identity})
     mgr = AccountManager(oauth, store, tmp_path / "st.json")
-    attempt = mgr.connect(with_calendar=True)
+    attempt = mgr.connect()
     assert attempt.ok
     st = attempt.status
     assert st.connected
     assert st.email == "one@example.com"
-    assert st.calendar_ready
-    assert not st.gmail_ready
+    # One consent screen covers everything — no later per-feature prompts.
+    assert st.calendar_ready and st.gmail_ready and st.notes_ready
+    assert "календар, пошта і нотатки доступні" in attempt.message
     assert oauth.authorize_calls == 1
     assert store.load("sub-1")
+
+
+def test_minimal_connect_still_possible(tmp_path):
+    store = InMemoryTokenStore()
+    identity = GoogleIdentity(sub="sub-1", email="one@example.com", name="One")
+    oauth = FakeOAuth(store, {identity.sub: identity})
+    mgr = AccountManager(oauth, store, tmp_path / "st.json")
+    st = mgr.connect(with_calendar=True, full_access=False).status
+    assert st.calendar_ready
+    assert not st.gmail_ready
+
+
+def test_partial_consent_names_what_is_missing(tmp_path):
+    """User unticked some boxes on Google's screen — say exactly what is missing and how to fix."""
+    from auth.scopes import CALENDAR_SCOPES, IDENTITY_SCOPES
+
+    store = InMemoryTokenStore()
+    identity = GoogleIdentity(sub="sub-1", email="one@example.com", name="One")
+    oauth = FakeOAuth(store, {identity.sub: identity})
+    oauth._next_authorize_scopes = list(IDENTITY_SCOPES + CALENDAR_SCOPES)
+    mgr = AccountManager(oauth, store, tmp_path / "st.json")
+    attempt = mgr.connect()
+    assert attempt.ok
+    assert "Доступно: календар" in attempt.message
+    assert "пошта, нотатки" in attempt.message
+
+    second = mgr.request_full_access()  # one more consent adds everything missing
+    assert second.status.gmail_ready and second.status.notes_ready and second.status.calendar_ready
+    assert oauth.authorize_calls == 2
+
+
+def test_status_does_not_wait_for_an_open_browser_consent(tmp_path):
+    """While the user is on Google's screen, other tools must keep answering."""
+    import threading
+
+    store = InMemoryTokenStore()
+    oauth = FakeOAuth(store)
+    mgr = AccountManager(oauth, store, tmp_path / "st.json")
+    in_browser = threading.Event()
+    release = threading.Event()
+    real_authorize = oauth.authorize
+
+    def slow_authorize(scopes=None):
+        in_browser.set()
+        release.wait(5)
+        return real_authorize(scopes)
+
+    oauth.authorize = slow_authorize  # type: ignore[method-assign]
+    worker = threading.Thread(target=mgr.connect)
+    worker.start()
+    assert in_browser.wait(2)
+    done = threading.Event()
+    threading.Thread(target=lambda: (mgr.status(), done.set())).start()
+    assert done.wait(1), "status() blocked behind the browser consent"
+    release.set()
+    worker.join(5)
 
 
 def test_oauth_denied_does_not_crash(tmp_path):

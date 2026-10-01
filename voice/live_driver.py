@@ -66,6 +66,8 @@ class LiveDriverMixin:
             live.speak_context("Слухаю!")
             if alert := self._connectivity_watcher.pop_alert():
                 live.speak_context(alert)
+            if pending := self._pop_deferred_announcement():
+                live.speak_context(pending)
             t_start = time.monotonic()
             while self._running and not live.sleep_requested and not self._sleep_requested:
                 # Live owns turn-taking; we only poll lifecycle flags + local robot safety.

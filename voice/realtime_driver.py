@@ -73,6 +73,9 @@ class RealtimeDriverMixin:
             if alert := self._connectivity_watcher.pop_alert():
                 self.rt.wait_until_response_done()
                 self.rt.say(alert)
+            if pending := self._pop_deferred_announcement():
+                self.rt.wait_until_response_done()
+                self.rt.say(pending)
 
             t_start = time.monotonic()
             while self._running and not self._sleep_requested:

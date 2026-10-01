@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from collections.abc import Callable
 from dataclasses import asdict
 from typing import Any
@@ -58,6 +59,13 @@ _NOTES_WORDS = (
 _GMAIL_WORDS = ("лист", "пошт", "gmail", "email", "чернетк", "надішли", "напиши на")
 _CALENDAR_WORDS = ("календар", "зустріч", "нагадування", "подія", "розклад", "скасуй зустріч", "перенеси")
 
+_CONSENT_OPENED_MSG = (
+    "Відкрив вікно входу Google у браузері. Оберіть свій акаунт і на сторінці дозволів "
+    "поставте всі галочки — календар, пошта і Google Drive, — тоді більше нічого "
+    "підтверджувати не доведеться. Поки ви там, я на зв'язку: питайте, якщо щось незрозуміло. "
+    "Результат входу повідомлю сам, щойно Google його підтвердить."
+)
+
 # Cheap authorized GETs, one per API host the agents talk to (Drive shares www.googleapis.com).
 _WARM_UP_PROBES: tuple[tuple[dict[str, bool], str], ...] = (
     ({"calendar": True}, "https://www.googleapis.com/calendar/v3/users/me/calendarList/primary?fields=id"),
@@ -79,6 +87,8 @@ class AgentRouter:
         self.gmail = gmail
         self.pending = pending
         self.notes = notes or NotesAgent(accounts)
+        self._consent_lock = threading.Lock()
+        self._consent_running = False
         self._intents: tuple[tuple[tuple[str, ...], IntentRoute], ...] = (
             (_CONNECT_WORDS, self._route_connect),
             (_GRANT_GMAIL_WORDS, lambda raw, lower, sid: self.grant_gmail()),
@@ -273,18 +283,20 @@ class AgentRouter:
             },
         )
 
-    def grant_gmail(self) -> AgentResult:
+    def grant_all(self) -> AgentResult:
+        """One consent screen for every permission the active account is still missing."""
         try:
-            attempt = self.accounts.request_gmail_permission()
+            attempt = self.accounts.request_full_access()
         except OAuthError as exc:
             from agents.types import result_from_google_error
 
             return result_from_google_error(exc)
+        st = attempt.status
         if not attempt.ok:
             return AgentResult(
                 "permission_denied",
                 attempt.message,
-                {"auth_ok": False, "gmail_ready": attempt.status.gmail_ready},
+                {"auth_ok": False, "gmail_ready": st.gmail_ready, "notes_ready": st.notes_ready},
             )
         return AgentResult(
             "success",
@@ -292,34 +304,67 @@ class AgentRouter:
             {
                 "auth_ok": True,
                 "permission_granted": True,
-                "gmail_ready": attempt.status.gmail_ready,
-                "granted_scopes": attempt.status.granted_scopes,
+                "calendar_ready": st.calendar_ready,
+                "gmail_ready": st.gmail_ready,
+                "notes_ready": st.notes_ready,
+                "granted_scopes": st.granted_scopes,
             },
         )
+
+    # Per-feature names kept for tools/tests — each asks for everything missing at once.
+    def grant_gmail(self) -> AgentResult:
+        return self.grant_all()
 
     def grant_notes(self) -> AgentResult:
-        try:
-            attempt = self.accounts.request_notes_permission()
-        except OAuthError as exc:
-            from agents.types import result_from_google_error
+        return self.grant_all()
 
-            return result_from_google_error(exc)
-        if not attempt.ok:
-            return AgentResult(
-                "permission_denied",
-                attempt.message,
-                {"auth_ok": False, "notes_ready": attempt.status.notes_ready},
-            )
-        return AgentResult(
-            "success",
-            attempt.message,
-            {
-                "auth_ok": True,
-                "permission_granted": True,
-                "notes_ready": attempt.status.notes_ready,
-                "granted_scopes": attempt.status.granted_scopes,
-            },
-        )
+    def start_consent(self, action: str, on_done: Callable[[AgentResult], None]) -> AgentResult:
+        """Open Google's consent in the browser WITHOUT blocking the conversation.
+
+        Returns at once so the assistant can keep talking (and help with the consent screen);
+        `on_done` receives the final result from a background thread when the user finishes,
+        cancels, or the browser step times out.
+        """
+        run = {
+            "connect": self.connect_google,
+            "reauth_switch": self.reauth_switch,
+            "grant_all": self.grant_all,
+            "grant_gmail": self.grant_all,
+            "grant_notes": self.grant_all,
+        }.get(action)
+        if run is None:
+            return AgentResult("error", f"Невідома дія входу Google: {action}.")
+        with self._consent_lock:
+            if self._consent_running:
+                return AgentResult(
+                    "needs_more_info",
+                    "Вікно входу Google уже відкрите в браузері — завершіть його там. "
+                    "Якщо вкладку закрили, зачекайте кілька хвилин або перезапустіть асистента.",
+                    {"consent_pending": True},
+                )
+            self._consent_running = True
+
+        def worker() -> None:
+            try:
+                result = run()
+            except Exception:
+                logger.exception("google.consent failed action=%s", action)
+                result = AgentResult(
+                    "error",
+                    "Не вдалося завершити вхід у Google. Скажіть «підключи Google», щоб спробувати ще раз.",
+                )
+            finally:
+                with self._consent_lock:
+                    self._consent_running = False
+            logger.info("google.consent finished action=%s status=%s", action, result.status)
+            try:
+                on_done(result)
+            except Exception:
+                logger.exception("google.consent result callback failed")
+
+        threading.Thread(target=worker, daemon=True, name="google-consent").start()
+        logger.info("google.consent opened action=%s", action)
+        return AgentResult("needs_more_info", _CONSENT_OPENED_MSG, {"consent_pending": True, "action": action})
 
     def reauth_switch(self) -> AgentResult:
         """Change account only via fresh browser OAuth — never by spoken email."""

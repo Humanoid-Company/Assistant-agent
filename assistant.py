@@ -76,6 +76,9 @@ from voice.realtime_driver import RealtimeDriverMixin
 
 _MEMORY_FILE = Path(__file__).parent / "assistant_memory.json"
 
+# google_account actions that open Google's consent page in the browser.
+_BROWSER_CONSENT_ACTIONS = frozenset({"connect", "reauth_switch", "grant_all", "grant_gmail", "grant_notes"})
+
 logger = logging.getLogger(__name__)
 
 
@@ -124,6 +127,8 @@ class Assistant(RealtimeDriverMixin, LiveDriverMixin):
         # Set when the model itself called control_robot for the current user turn, so the
         # local trigger fast-path does not run the same physical action a second time.
         self._model_robot_action_this_turn = False
+        # Outcome of a Google consent that finished while no voice session was open.
+        self._deferred_announcement: str | None = None
 
         # Conversation history for the current run only — carries over between
         # sleep/wake cycles (in-memory), but resets when the process restarts.
@@ -305,26 +310,38 @@ class Assistant(RealtimeDriverMixin, LiveDriverMixin):
     def _google_account(self, args: dict) -> AgentResult:
         action = (args.get("action") or "").strip().lower()
         # Ignore any LLM-supplied email/user_sub — never use as identity.
-        if action == "connect":
-            return self.router.connect_google(with_gmail=bool(args.get("with_gmail")))
+        if action == "switch":
+            action = "reauth_switch"  # alias; always a fresh browser login, never an email lookup
+        if action in _BROWSER_CONSENT_ACTIONS:
+            # The browser step takes minutes: run it in the background so the conversation
+            # (including help with Google's consent screen) continues meanwhile.
+            return self.router.start_consent(action, on_done=self._announce_consent_result)
         if action == "status":
             return self.router.google_status()
         if action == "disconnect":
             return self.router.disconnect_google()
-        if action == "grant_gmail":
-            return self.router.grant_gmail()
-        if action == "grant_notes":
-            return self.router.grant_notes()
-        if action in ("reauth_switch", "switch"):
-            # "switch" kept as alias but always forces browser re-auth — never email lookup.
-            return self.router.reauth_switch()
         if action in ("lock_session", "lock"):
             return self.router.lock_session()
         return AgentResult(
             "needs_more_info",
-            "Доступні дії: connect, status, disconnect, grant_gmail, grant_notes, "
+            "Доступні дії: connect, status, disconnect, grant_all, grant_gmail, grant_notes, "
             "reauth_switch, lock_session.",
         )
+
+    def _announce_consent_result(self, result: AgentResult) -> None:
+        """Speak the outcome of a background Google consent into whichever session is open;
+        if the user already ended the conversation, say it right after the next wake."""
+        message = result.message
+        if self._live is not None:
+            self._live.speak_context(message)
+        elif self.rt is not None:
+            self.rt.say(message)
+        else:
+            self._deferred_announcement = message
+
+    def _pop_deferred_announcement(self) -> str | None:
+        message, self._deferred_announcement = self._deferred_announcement, None
+        return message
 
 
     def _connectivity_watch_loop(self) -> None:

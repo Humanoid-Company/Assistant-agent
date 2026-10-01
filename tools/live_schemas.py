@@ -268,8 +268,11 @@ LIVE_BACKEND_TOOLS: list[dict] = [
     ),
     _fn(
         "google_account",
-        "Browser OAuth Google account: connect, status, disconnect, grant_gmail, grant_notes, "
-        "reauth_switch, lock_session. Voice/email is NOT identity proof.",
+        "Browser OAuth Google account. connect / reauth_switch (new or different user) and "
+        "grant_all (add every missing permission) open ONE consent page for calendar, Gmail and "
+        "Drive notes and return immediately with consent_pending — the result is announced "
+        "later. Also: status, disconnect, lock_session. grant_gmail/grant_notes = grant_all. "
+        "Voice/email is NOT identity proof.",
         {
             "action": {
                 "type": "string",
@@ -277,6 +280,7 @@ LIVE_BACKEND_TOOLS: list[dict] = [
                     "connect",
                     "status",
                     "disconnect",
+                    "grant_all",
                     "grant_gmail",
                     "grant_notes",
                     "reauth_switch",

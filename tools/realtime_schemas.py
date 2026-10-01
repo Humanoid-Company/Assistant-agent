@@ -88,7 +88,9 @@ TOOLS: list[dict] = [
         "name": "google_account",
         "description": (
             "Керування Google-акаунтом через браузерний OAuth: connect, status, disconnect, "
-            "grant_gmail (incremental дозвіл Gmail), grant_notes (дозвіл Google Drive для нотаток), "
+            "grant_all (одним вікном додати всі відсутні дозволи — календар, Gmail, нотатки; "
+            "grant_gmail/grant_notes — те саме). connect/reauth_switch/grant_all відкривають браузер "
+            "і повертаються одразу (consent_pending) — результат прийде окремо, не викликай повторно; "
             "reauth_switch (зміна акаунта ТІЛЬКИ через "
             "браузерний вибір — НЕ за названим email), lock_session (скинути активну сесію на "
             "спільному ПК/роботі). Голос/email НЕ є доказом особи."
@@ -102,6 +104,7 @@ TOOLS: list[dict] = [
                         "connect",
                         "status",
                         "disconnect",
+                        "grant_all",
                         "grant_gmail",
                         "grant_notes",
                         "reauth_switch",
