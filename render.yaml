@@ -1,0 +1,29 @@
+# Render Blueprint for the web backend (server/). Render → New → Blueprint → this repo.
+# Secrets marked sync: false are entered in the Render dashboard, never committed.
+services:
+  - type: web
+    name: voice-agent-backend
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements-server.txt
+    startCommand: uvicorn server.app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: PUBLIC_BACKEND_URL # e.g. https://voice-agent-backend.onrender.com
+        sync: false
+      - key: FRONTEND_ORIGINS # e.g. https://voice-agent.vercel.app (comma-separated)
+        sync: false
+      - key: GOOGLE_OAUTH_WEB_CLIENT_ID
+        sync: false
+      - key: GOOGLE_OAUTH_WEB_CLIENT_SECRET
+        sync: false
+      - key: ACCESS_CODE # team password for the page; empty = anyone with the link
+        sync: false
+      - key: WEB_SEARCH_API_KEY
+        sync: false
+      - key: GOOGLE_CALENDAR_TIMEZONE
+        value: Europe/Kyiv

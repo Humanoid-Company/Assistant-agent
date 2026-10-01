@@ -328,6 +328,27 @@ class AccountManager:
     def request_notes_permission(self) -> AuthAttemptResult:
         return self.request_full_access()
 
+    def activate(
+        self,
+        identity: GoogleIdentity,
+        *,
+        credentials_json: str | None = None,
+        granted: list[str] | None = None,
+    ) -> AccountStatus:
+        """Make an account active after a login completed outside this manager (the web
+        server's redirect-based OAuth), storing its credentials when given."""
+        if credentials_json is not None:
+            self._store.save_record(identity.sub, credentials_json, list(granted or []))
+        with self._lock:
+            self._profiles[identity.sub] = {"email": identity.email, "name": identity.name}
+            self._active_sub = identity.sub
+            self._session_touch()
+            self._save_state()
+            st = self.status()
+            st.last_auth_ok = True
+            st.message = access_summary(st)
+            return st
+
     def disconnect(self, google_sub: str | None = None) -> AccountStatus:
         with self._lock:
             target = google_sub or self._active_sub

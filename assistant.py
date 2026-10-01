@@ -38,13 +38,10 @@ from config import (
     SYSTEM_PROMPT,
     TRIGGER_PHRASES,
     VOICE_ENGINE,
-    WEB_SEARCH_API_KEY,
     WEB_SEARCH_MAX_CALLS_PER_TURN,
-    WEB_SEARCH_TIMEOUT_S,
 )
 from integrations.web_search import (
     WebSearchRateLimiter,
-    search_web,
 )
 from realtime_client import RealtimeConversation
 from robot_control import ROBOT_ACTIONS, create_robot_controller
@@ -67,6 +64,7 @@ from tools.router_bridge import (  # noqa: F401  (several are re-exported for te
     calendar_tool_args,
 )
 from tools.task_context import TaskRevisionTracker
+from tools.web_search_tool import web_search_tool_result
 from voice.base import State
 from voice.factory import normalize_voice_engine
 from voice.live_driver import LiveDriverMixin
@@ -240,68 +238,8 @@ class Assistant(RealtimeDriverMixin, LiveDriverMixin):
         session_id: str | None = None,
         delegation_id: str | None = None,
     ) -> ToolResult:
-        query = str(args.get("query") or "")
-        max_results = args.get("max_results")
-        recency_days = args.get("recency_days")
-        result = search_web(
-            query,
-            max_results=max_results if max_results is not None else 5,
-            recency_days=recency_days if recency_days is not None else None,
-            api_key=WEB_SEARCH_API_KEY,
-            timeout_s=WEB_SEARCH_TIMEOUT_S,
-            delegation_id=delegation_id,
-            session_id=session_id,
-            rate_limiter=self._web_search_limiter,
-        )
-        data = result.to_dict()
-        if result.error == "empty_query":
-            return ToolResult(
-                ok=False,
-                status="needs_more_info",
-                message="Порожній пошуковий запит — уточни, що саме шукати.",
-                data=data,
-            )
-        if result.error == "web_search_rate_limited":
-            return ToolResult(
-                ok=False,
-                status="rate_limited",
-                message="Забагато пошукових запитів підряд. Спершу озвуч те, що вже знайшов.",
-                data=data,
-            )
-        if result.error == "web_search_timeout":
-            return ToolResult(
-                ok=False,
-                status="error",
-                message="Пошук в інтернеті не встиг відповісти. Спробуй коротший запит або пізніше.",
-                data=data,
-            )
-        if result.error == "web_search_unavailable":
-            return ToolResult(
-                ok=False,
-                status="error",
-                message="Вебпошук зараз недоступний. Можу відповісти з того, що вже знаю, або спробуємо пізніше.",
-                data=data,
-            )
-        if not result.results:
-            return ToolResult(
-                ok=True,
-                status="ok",
-                message="За цим запитом надійних результатів не знайдено.",
-                data=data,
-            )
-        # Compact message for the model; structured hits live in data.results.
-        lines = []
-        for hit in result.results[:5]:
-            bit = hit.title or hit.source or hit.url
-            if hit.snippet:
-                bit = f"{bit}: {hit.snippet[:220]}"
-            lines.append(bit)
-        return ToolResult(
-            ok=True,
-            status="ok",
-            message="Знайдено результати пошуку. Коротко підсумуй користувачу; URL не зачитуй без прохання. "
-            + " | ".join(lines),
-            data=data,
+        return web_search_tool_result(
+            args, session_id=session_id, delegation_id=delegation_id, limiter=self._web_search_limiter
         )
 
     # ── Tool calls (assistant commands) ───────────────────────────────────────

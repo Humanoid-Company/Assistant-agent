@@ -20,6 +20,11 @@ dependencies = [
 ]
 
 [dependency-groups]
+# Hosted web backend (server/): `uv sync --group server`
+server = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+]
 dev = [
     "pytest>=8.2",
     "ruff>=0.6",
