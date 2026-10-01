@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import asdict
 from typing import Any
 
@@ -19,6 +20,43 @@ logger = logging.getLogger(__name__)
 
 _YES = re.compile(r"^\s*(так|да|yes|підтверджую|confirm|згоден|згодна)\s*[.!?]?\s*$", re.I)
 _NO = re.compile(r"^\s*(ні|нет|no|скасуй|не треба|cancel|reject)\s*[.!?]?\s*$", re.I)
+
+IntentRoute = Callable[[str, str, str | None], AgentResult]
+
+# Free-text (dispatch_task) keyword tables, lowercase substrings.
+_CONNECT_WORDS = ("підключи google", "підключити google", "увійди в google", "connect google", "авторизуй google")
+_GRANT_GMAIL_WORDS = ("дай доступ до gmail", "дозвіл gmail", "підключи gmail", "доступ до пошти", "grant gmail")
+_GRANT_NOTES_WORDS = (
+    "дай доступ до нотаток",
+    "доступ до нотаток",
+    "дозвіл нотатки",
+    "підключи нотатки",
+    "grant notes",
+    "доступ до google drive",
+)
+_DISCONNECT_WORDS = ("відключи google", "вийди з google", "disconnect google")
+_SWITCH_WORDS = ("зміни google акаунт", "перемкни google", "інший google акаунт", "switch google account")
+_LOCK_WORDS = ("заблокуй сесію", "заблокуй google", "lock session")
+_STATUS_WORDS = ("статус google", "хто підключений", "google статус")
+_NOTES_WORDS = (
+    "запиши нотат",
+    "занотуй",
+    "запам'ятай",
+    "запам’ятай",
+    "додай до нотат",
+    "мої нотат",
+    "знайди нотат",
+    "що я записував",
+    "прочитай нотат",
+    "останні нотат",
+    "скільки нотат",
+    "видали нотат",
+    "зміни нотат",
+    "допиши",
+    "перейменуй нотат",
+)
+_GMAIL_WORDS = ("лист", "пошт", "gmail", "email", "чернетк", "надішли", "напиши на")
+_CALENDAR_WORDS = ("календар", "зустріч", "нагадування", "подія", "розклад", "скасуй зустріч", "перенеси")
 
 # Cheap authorized GETs, one per API host the agents talk to (Drive shares www.googleapis.com).
 _WARM_UP_PROBES: tuple[tuple[dict[str, bool], str], ...] = (
@@ -41,6 +79,18 @@ class AgentRouter:
         self.gmail = gmail
         self.pending = pending
         self.notes = notes or NotesAgent(accounts)
+        self._intents: tuple[tuple[tuple[str, ...], IntentRoute], ...] = (
+            (_CONNECT_WORDS, self._route_connect),
+            (_GRANT_GMAIL_WORDS, lambda raw, lower, sid: self.grant_gmail()),
+            (_GRANT_NOTES_WORDS, lambda raw, lower, sid: self.grant_notes()),
+            (_DISCONNECT_WORDS, lambda raw, lower, sid: self.disconnect_google()),
+            (_SWITCH_WORDS, lambda raw, lower, sid: self.reauth_switch()),
+            (_LOCK_WORDS, lambda raw, lower, sid: self.lock_session()),
+            (_STATUS_WORDS, lambda raw, lower, sid: self.google_status()),
+            (_NOTES_WORDS, self._route_notes),
+            (_GMAIL_WORDS, self._route_gmail),
+            (_CALENDAR_WORDS, self._route_calendar),
+        )
 
     def handle_text(self, text: str, *, session_id: str | None = None) -> AgentResult:
         """Free-text entry (dispatch_task compatibility). Prefer typed tools when possible."""
@@ -91,145 +141,79 @@ class AgentRouter:
                 )
 
         lower = raw.lower()
-        if any(
-            k in lower
-            for k in (
-                "підключи google",
-                "підключити google",
-                "увійди в google",
-                "connect google",
-                "авторизуй google",
-            )
-        ):
-            with_gmail = "gmail" in lower or "пошт" in lower
-            return self.connect_google(with_gmail=with_gmail)
-        if any(
-            k in lower
-            for k in (
-                "дай доступ до gmail",
-                "дозвіл gmail",
-                "підключи gmail",
-                "доступ до пошти",
-                "grant gmail",
-            )
-        ):
-            return self.grant_gmail()
-        if any(
-            k in lower
-            for k in (
-                "дай доступ до нотаток",
-                "доступ до нотаток",
-                "дозвіл нотатки",
-                "підключи нотатки",
-                "grant notes",
-                "доступ до google drive",
-            )
-        ):
-            return self.grant_notes()
-        if any(k in lower for k in ("відключи google", "вийди з google", "disconnect google")):
-            return self.disconnect_google()
-        if any(
-            k in lower
-            for k in (
-                "зміни google акаунт",
-                "перемкни google",
-                "інший google акаунт",
-                "switch google account",
-            )
-        ):
-            return self.reauth_switch()
-        if any(k in lower for k in ("заблокуй сесію", "заблокуй google", "lock session")):
-            return self.lock_session()
-        if any(k in lower for k in ("статус google", "хто підключений", "google статус")):
-            return self.google_status()
-
-        if any(
-            k in lower
-            for k in (
-                "запиши нотат",
-                "занотуй",
-                "запам'ятай",
-                "запам’ятай",
-                "додай до нотат",
-                "мої нотат",
-                "знайди нотат",
-                "що я записував",
-                "прочитай нотат",
-                "останні нотат",
-                "скільки нотат",
-                "видали нотат",
-                "зміни нотат",
-                "допиши",
-                "перейменуй нотат",
-            )
-        ):
-            if any(k in lower for k in ("скільки нотат", "скільки запис")):
-                return self.notes.handle("count")
-            if any(k in lower for k in ("видали", "прибери")):
-                q = re.sub(
-                    r".*?(видали|прибери)\s+(нотатку|запис)?\s*(про)?\s*",
-                    "",
-                    raw,
-                    count=1,
-                    flags=re.I,
-                ).strip(" ?.!")
-                return self.notes.handle("delete", target=q or "остання", query=q or None)
-            if any(k in lower for k in ("допиши", "доповни")):
-                return self.notes.handle(
-                    "append",
-                    target="остання" if "останн" in lower else None,
-                    query=raw,
-                    append_text=raw,
-                )
-            if any(k in lower for k in ("зміни", "відредагуй", "заміни", "перейменуй")):
-                return self.notes.handle("update", query=raw, target=raw, content=raw)
-            if any(k in lower for k in ("знайди", "що я записував", "чи я щось записував", "про ")):
-                q = re.sub(
-                    r".*?(знайди|записував про|про)\s+",
-                    "",
-                    raw,
-                    count=1,
-                    flags=re.I,
-                ).strip(" ?.!")
-                return self.notes.handle("search", query=q or raw)
-            if any(k in lower for k in ("прочитай", "останн", "які в мене", "список")):
-                return self.notes.handle("read", limit=5)
-            content = re.sub(
-                r"^(запиши нотатку|запиши ідею|занотуй|запам'ятай|запам’ятай|"
-                r"додай до моїх нотаток|збережи ідею)\s*:?\s*",
-                "",
-                raw,
-                flags=re.I,
-            ).strip()
-            return self.notes.handle("add", content=content or raw)
-
-        if any(k in lower for k in ("лист", "пошт", "gmail", "email", "чернетк", "надішли", "напиши на")):
-            if "знайди" in lower or "пошук" in lower or "шукай" in lower:
-                q = re.sub(r".*?(знайди|пошук|шукай)\s+", "", raw, flags=re.I).strip() or raw
-                return self.gmail.handle("search", query=q)
-            return AgentResult(
-                "needs_more_info",
-                "Для пошти потрібні чіткі поля: одержувач, тема і текст — або скажи «знайди листи …».",
-            )
-
-        if any(
-            k in lower
-            for k in ("календар", "зустріч", "нагадування", "подія", "розклад", "скасуй зустріч", "перенеси")
-        ):
-            if any(k in lower for k in ("скасуй", "відміни", "видали", "видалі")):
-                return self.calendar.handle("cancel", query=raw, session_id=session_id)
-            if any(k in lower for k in ("перенес", "пересунь", "зміни", "переймен", "тривалість", "опис")):
-                return self.calendar.handle("edit", query=raw, session_id=session_id)
-            if any(k in lower for k in ("що у мене", "розклад", "які зустрічі", "покажи календар")):
-                return self.calendar.handle("list", session_id=session_id)
-            return AgentResult(
-                "needs_more_info",
-                "Щоб створити подію, назви тему, дату (РРРР-ММ-ДД) і час (ГГ:ХХ).",
-            )
-
+        for keywords, route in self._intents:
+            if any(k in lower for k in keywords):
+                return route(raw, lower, session_id)
         return AgentResult(
             "needs_more_info",
             "Можу допомогти з Google Календарем, Gmail і нотатками. Уточни завдання або підключи Google-акаунт.",
+        )
+
+    # ── Free-text intents (dispatch_task) — checked in table order, first match wins ──
+
+    def _route_connect(self, raw: str, lower: str, session_id: str | None) -> AgentResult:
+        return self.connect_google(with_gmail="gmail" in lower or "пошт" in lower)
+
+    def _route_notes(self, raw: str, lower: str, session_id: str | None) -> AgentResult:
+        if any(k in lower for k in ("скільки нотат", "скільки запис")):
+            return self.notes.handle("count")
+        if any(k in lower for k in ("видали", "прибери")):
+            q = re.sub(
+                r".*?(видали|прибери)\s+(нотатку|запис)?\s*(про)?\s*",
+                "",
+                raw,
+                count=1,
+                flags=re.I,
+            ).strip(" ?.!")
+            return self.notes.handle("delete", target=q or "остання", query=q or None)
+        if any(k in lower for k in ("допиши", "доповни")):
+            return self.notes.handle(
+                "append",
+                target="остання" if "останн" in lower else None,
+                query=raw,
+                append_text=raw,
+            )
+        if any(k in lower for k in ("зміни", "відредагуй", "заміни", "перейменуй")):
+            return self.notes.handle("update", query=raw, target=raw, content=raw)
+        if any(k in lower for k in ("знайди", "що я записував", "чи я щось записував", "про ")):
+            q = re.sub(
+                r".*?(знайди|записував про|про)\s+",
+                "",
+                raw,
+                count=1,
+                flags=re.I,
+            ).strip(" ?.!")
+            return self.notes.handle("search", query=q or raw)
+        if any(k in lower for k in ("прочитай", "останн", "які в мене", "список")):
+            return self.notes.handle("read", limit=5)
+        content = re.sub(
+            r"^(запиши нотатку|запиши ідею|занотуй|запам'ятай|запам’ятай|"
+            r"додай до моїх нотаток|збережи ідею)\s*:?\s*",
+            "",
+            raw,
+            flags=re.I,
+        ).strip()
+        return self.notes.handle("add", content=content or raw)
+
+    def _route_gmail(self, raw: str, lower: str, session_id: str | None) -> AgentResult:
+        if "знайди" in lower or "пошук" in lower or "шукай" in lower:
+            q = re.sub(r".*?(знайди|пошук|шукай)\s+", "", raw, flags=re.I).strip() or raw
+            return self.gmail.handle("search", query=q)
+        return AgentResult(
+            "needs_more_info",
+            "Для пошти потрібні чіткі поля: одержувач, тема і текст — або скажи «знайди листи …».",
+        )
+
+    def _route_calendar(self, raw: str, lower: str, session_id: str | None) -> AgentResult:
+        if any(k in lower for k in ("скасуй", "відміни", "видали", "видалі")):
+            return self.calendar.handle("cancel", query=raw, session_id=session_id)
+        if any(k in lower for k in ("перенес", "пересунь", "зміни", "переймен", "тривалість", "опис")):
+            return self.calendar.handle("edit", query=raw, session_id=session_id)
+        if any(k in lower for k in ("що у мене", "розклад", "які зустрічі", "покажи календар")):
+            return self.calendar.handle("list", session_id=session_id)
+        return AgentResult(
+            "needs_more_info",
+            "Щоб створити подію, назви тему, дату (РРРР-ММ-ДД) і час (ГГ:ХХ).",
         )
 
     def _confirm_pending(
