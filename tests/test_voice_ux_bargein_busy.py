@@ -13,7 +13,7 @@ from tools.calendar_tools import CalendarToolWrappers
 from tools.executor import ToolExecutor
 from tools.gmail_tools import GmailToolWrappers
 from tools.task_context import TaskRevisionTracker
-from voice.barge_in_gate import BargeInAction, BargeInGate, BargeInState
+from voice.barge_in_gate import BargeInAction, BargeInGate
 from voice.busy_cues import BusyCueController
 from voice.live_session import LiveVoiceSession
 from voice.local_vad import LocalSpeechDetector, VadTick, downsample_24k_to_16k, pcm_rms
@@ -163,8 +163,8 @@ def test_actual_sustained_speech_confirms():
     gate._candidate_started = time.monotonic() - 0.12
     # Feed several modulated speech ticks
     for _ in range(5):
-        gate.vad.feed = lambda pcm, update_ambient=True: _speech_like_tick(  # type: ignore
-            onset=False, frames_ms=40, rms=2500 + (_ % 3) * 400
+        gate.vad.feed = lambda pcm, update_ambient=True, i=_: _speech_like_tick(  # type: ignore
+            onset=False, frames_ms=40, rms=2500 + (i % 3) * 400
         )
         d = gate.feed_mic(b"x", assistant_or_cue_playing=True)
         if d.action == BargeInAction.CONFIRM:

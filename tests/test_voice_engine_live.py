@@ -5,8 +5,6 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from agents.types import AgentResult
 from tools.calendar_tools import CalendarToolWrappers
 from tools.executor import ToolExecutionContext, ToolExecutor

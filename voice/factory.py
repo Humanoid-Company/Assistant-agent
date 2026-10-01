@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
 from config import VOICE_ENGINE
 

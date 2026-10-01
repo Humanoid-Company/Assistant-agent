@@ -7,7 +7,8 @@ import logging
 import threading
 import time
 import uuid
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 from openai import AsyncOpenAI, OpenAI
 
@@ -53,7 +54,7 @@ def _event_attr(obj: Any, name: str, default: Any = None) -> Any:
     return getattr(obj, name, default)
 
 
-def _synthesize_cue_pcm(text: str) -> Optional[bytes]:
+def _synthesize_cue_pcm(text: str) -> bytes | None:
     """Local OpenAI TTS → raw PCM16 @ 24 kHz (no Live reasoning cycle)."""
     if not text.strip():
         return None
@@ -84,7 +85,7 @@ class LiveVoiceSession:
         audio_rate: int | None = None,
         on_user_transcript: Callable[[str], None] | None = None,
         session_id: str | None = None,
-        cue_synthesize: Callable[[str], Optional[bytes]] | None = None,
+        cue_synthesize: Callable[[str], bytes | None] | None = None,
     ) -> None:
         self._executor = tool_executor
         self._voice = voice or OPENAI_LIVE_VOICE
@@ -300,31 +301,30 @@ class LiveVoiceSession:
         assert self._mic_read is not None
         self._client = AsyncOpenAI(api_key=OPENAI_API_KEY)
         session_config = self._session_config()
-        async with self._client:
-            async with self._client.live.connect() as connection:
-                self._connection = connection
-                await connection.session.start(session=session_config, event_id="event_start")
-                sender = asyncio.create_task(self._send_audio_loop())
-                self._tasks.add(sender)
-                try:
-                    async for event in connection:
-                        await self._handle_event(event)
-                        if self._sleep_requested and _event_attr(event, "type") == "session.closed":
-                            break
-                        if self._sleep_requested and not self._closed.is_set():
-                            # Request graceful close once; keep reading until session.closed.
-                            if not getattr(self, "_close_sent", False):
-                                self._close_sent = True
-                                try:
-                                    await connection.session.close()
-                                except Exception:
-                                    logger.exception("live.error session.close failed")
-                                    break
-                finally:
-                    sender.cancel()
-                    await asyncio.gather(sender, return_exceptions=True)
-                    self._tasks.discard(sender)
-                    self._connection = None
+        async with self._client, self._client.live.connect() as connection:
+            self._connection = connection
+            await connection.session.start(session=session_config, event_id="event_start")
+            sender = asyncio.create_task(self._send_audio_loop())
+            self._tasks.add(sender)
+            try:
+                async for event in connection:
+                    await self._handle_event(event)
+                    if self._sleep_requested and _event_attr(event, "type") == "session.closed":
+                        break
+                    if self._sleep_requested and not self._closed.is_set():
+                        # Request graceful close once; keep reading until session.closed.
+                        if not getattr(self, "_close_sent", False):
+                            self._close_sent = True
+                            try:
+                                await connection.session.close()
+                            except Exception:
+                                logger.exception("live.error session.close failed")
+                                break
+            finally:
+                sender.cancel()
+                await asyncio.gather(sender, return_exceptions=True)
+                self._tasks.discard(sender)
+                self._connection = None
 
     def _session_config(self) -> dict[str, Any]:
         return {

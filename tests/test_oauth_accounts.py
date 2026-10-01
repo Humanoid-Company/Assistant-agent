@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 from auth.account_manager import AccountManager
-from auth.google_oauth import GoogleIdentity, OAuthError
+from auth.google_oauth import GoogleIdentity
 from auth.token_store import InMemoryTokenStore
-from tests.helpers_google import CALENDAR_ONLY_SCOPES, FakeOAuth, _fake_creds, build_test_router
+from tests.helpers_google import CALENDAR_ONLY_SCOPES, FakeOAuth, build_test_router
 
 
 def test_oauth_success_connects_account(tmp_path):

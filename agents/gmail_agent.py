@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from typing import Callable
+from collections.abc import Callable
 
 from agents.pending_store import PendingConflict, PendingStore
 from agents.types import AgentResult, result_from_google_error
@@ -26,7 +26,7 @@ _GMAIL_PENDING_KINDS = frozenset({"gmail_send", "gmail_reply"})
 
 
 def _fingerprint(to: str, subject: str, body: str) -> str:
-    raw = f"{to}\n{subject}\n{body}".encode("utf-8")
+    raw = f"{to}\n{subject}\n{body}".encode()
     return hashlib.sha256(raw).hexdigest()
 
 

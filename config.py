@@ -15,7 +15,7 @@ _ROOT = Path(__file__).resolve().parent
 OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 
 if not OPENAI_API_KEY:
-    raise EnvironmentError(
+    raise OSError(
         "OPENAI_API_KEY is not set.\n"
         "Create a .env file in the project directory with:\n"
         "OPENAI_API_KEY=sk-..."

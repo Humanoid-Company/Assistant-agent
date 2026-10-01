@@ -95,7 +95,7 @@ def test_google_429_rate_limit(tmp_path):
 def test_multistep_context_same_user(tmp_path):
     router, cal, *_ = build_test_router(tmp_path)
     future = (datetime.now(ZoneInfo("Europe/Kyiv")) + timedelta(days=6)).strftime("%Y-%m-%d")
-    r1 = router.handle_text(f"створи зустріч Демо")  # free text → needs more info
+    r1 = router.handle_text("створи зустріч Демо")  # free text → needs more info
     assert r1.status in ("needs_more_info", "confirmation_required")
     r2 = router.calendar_action(action="create", title="Демо", date=future, time="12:00")
     assert r2.status == "confirmation_required"

@@ -307,7 +307,7 @@ def test_move_to_another_day_title_duration_and_description(tmp_path):
     assert cal.events[eid]["start"]["dateTime"].startswith(f"{target_day}T14:30")
     assert "start" not in cal.update_calls[-1][1]
 
-    longer = router.calendar_action(action="edit", event_id=eid, duration_minutes=90)
+    router.calendar_action(action="edit", event_id=eid, duration_minutes=90)
     assert router.calendar_action(action="confirm", confirmation="yes").status == "success"
     start = datetime.fromisoformat(cal.events[eid]["start"]["dateTime"])
     end = datetime.fromisoformat(cal.events[eid]["end"]["dateTime"])
@@ -315,7 +315,7 @@ def test_move_to_another_day_title_duration_and_description(tmp_path):
     assert "start" not in cal.update_calls[-1][1]
     assert cal.events[eid]["summary"] == "Обід із командою"
 
-    described = router.calendar_action(action="edit", event_id=eid, new_description="порядок денний")
+    router.calendar_action(action="edit", event_id=eid, new_description="порядок денний")
     assert router.calendar_action(action="confirm", confirmation="yes").status == "success"
     assert cal.events[eid]["description"] == "порядок денний"
     assert set(cal.update_calls[-1][1]) == {"description"}

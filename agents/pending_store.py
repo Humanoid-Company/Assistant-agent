@@ -11,7 +11,6 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-
 DEFAULT_PENDING_TTL_S = 300.0  # 5 minutes
 POST_SUCCESS_TTL_S = 120.0
 

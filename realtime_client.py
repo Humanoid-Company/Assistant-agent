@@ -29,7 +29,7 @@ import logging
 import queue
 import threading
 import time
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import numpy as np
 import sounddevice as sd
@@ -91,9 +91,9 @@ class RealtimePlayer:
     """Plays raw PCM16 @ 24kHz audio deltas from the Realtime API."""
 
     def __init__(self) -> None:
-        self._queue: "queue.Queue[Optional[bytes]]" = queue.Queue()
-        self._stream: Optional[sd.RawOutputStream] = None
-        self._thread: Optional[threading.Thread] = None
+        self._queue: queue.Queue[bytes | None] = queue.Queue()
+        self._stream: sd.RawOutputStream | None = None
+        self._thread: threading.Thread | None = None
         self._ms_played = 0.0
         self._lock = threading.Lock()
 
@@ -163,9 +163,9 @@ class RealtimeConversation:
     def __init__(
         self,
         tools: list[dict],
-        on_tool_call: Callable[[str, dict, str], Optional[str]],
-        silent_tools: Optional[set[str]] = None,
-        no_followup_tools: Optional[set[str]] = None,
+        on_tool_call: Callable[[str, dict, str], str | None],
+        silent_tools: set[str] | None = None,
+        no_followup_tools: set[str] | None = None,
         voice: str = REALTIME_VOICE,
     ) -> None:
         self._client = OpenAI(api_key=OPENAI_API_KEY)
@@ -189,10 +189,10 @@ class RealtimeConversation:
         self._cm = None
         self._conn = None
         self._send_lock = threading.Lock()
-        self._events: "queue.Queue" = queue.Queue()
+        self._events: queue.Queue = queue.Queue()
         self._closed = threading.Event()
-        self._reader_thread: Optional[threading.Thread] = None
-        self._feeder_thread: Optional[threading.Thread] = None
+        self._reader_thread: threading.Thread | None = None
+        self._feeder_thread: threading.Thread | None = None
 
         self.player = RealtimePlayer()
 
@@ -214,7 +214,7 @@ class RealtimeConversation:
         # completes — consumed by pump_for_transcript() for deterministic
         # trigger-phrase matching (assistant.py) without a second, separate
         # STT pass that could disagree with what this session itself heard.
-        self._last_transcript: Optional[str] = None
+        self._last_transcript: str | None = None
         self._silent_tool_used_this_response = False
         # Counts rather than a single flag: a tool call's function_call_output
         # triggers a follow-up create_response() *before* the tool-call
@@ -234,20 +234,20 @@ class RealtimeConversation:
         # that produced a fabricated "не вдалося знайти" reply once (see config.py's guardrail
         # against inventing a task result, added alongside this fix) instead of the real,
         # already-computed dispatch_task answer.
-        self._deferred_response_requests: list[Optional[str]] = []
+        self._deferred_response_requests: list[str | None] = []
 
         # Speculative replies: the caller starts a reply at end-of-speech, before the
         # transcript lands, and may then take the turn back (local robot command).
         # Events of a cancelled response (audio, tool calls, transcript) are dropped.
-        self._current_response_id: Optional[str] = None
+        self._current_response_id: str | None = None
         self._awaiting_response_created = False
         self._cancelled_response_ids: set[str] = set()
         self._cancel_on_created_until = 0.0
 
         # Latency instrumentation.
-        self._speech_stopped_at: Optional[float] = None
-        self._response_requested_at: Optional[float] = None
-        self._first_audio_at: Optional[float] = None
+        self._speech_stopped_at: float | None = None
+        self._response_requested_at: float | None = None
+        self._first_audio_at: float | None = None
 
     # ── Connection ────────────────────────────────────────────────────────────
 
@@ -368,14 +368,14 @@ class RealtimeConversation:
             if not self._closed.is_set():
                 logger.warning("Realtime connection lost: %s", exc)
 
-    def pump(self, timeout: float = 0.05) -> Optional[bytes]:
+    def pump(self, timeout: float = 0.05) -> bytes | None:
         """
         Process queued events for up to *timeout* seconds.
 
         Returns the raw 16 kHz PCM of a user utterance if one just finished
         (speech_started -> speech_stopped) during this call, else None.
         """
-        completed_pcm: Optional[bytes] = None
+        completed_pcm: bytes | None = None
         deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
@@ -390,7 +390,7 @@ class RealtimeConversation:
                 completed_pcm = pcm
         return completed_pcm
 
-    def pump_for_transcript(self, timeout: float = 1.5) -> Optional[str]:
+    def pump_for_transcript(self, timeout: float = 1.5) -> str | None:
         """Blocks until the input transcription for the utterance that just
         finished (speech_stopped) arrives, or *timeout* elapses.
 
@@ -419,7 +419,7 @@ class RealtimeConversation:
                 return
             self.pump(timeout=0.1)
 
-    def _handle_event(self, event) -> Optional[bytes]:
+    def _handle_event(self, event) -> bytes | None:
         etype = getattr(event, "type", "")
 
         if etype == "input_audio_buffer.speech_started":
@@ -604,7 +604,7 @@ class RealtimeConversation:
             },
         })
 
-    def create_response(self, tool_choice: Optional[str] = None) -> None:
+    def create_response(self, tool_choice: str | None = None) -> None:
         """Ask the model for a normal conversational reply.
 
         No-ops (deferring instead — see the response.done handler) if a

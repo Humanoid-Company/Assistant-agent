@@ -5,7 +5,6 @@ import logging
 import queue
 import threading
 import time
-from typing import Optional
 
 import numpy as np
 import sounddevice as sd
@@ -27,9 +26,9 @@ class PlaybackTracker:
     def __init__(self, *, sample_rate: int = 24_000, channels: int = 1) -> None:
         self._sample_rate = sample_rate
         self._channels = channels
-        self._queue: "queue.Queue[Optional[_QueueItem]]" = queue.Queue()
-        self._stream: Optional[sd.RawOutputStream] = None
-        self._thread: Optional[threading.Thread] = None
+        self._queue: queue.Queue[_QueueItem | None] = queue.Queue()
+        self._stream: sd.RawOutputStream | None = None
+        self._thread: threading.Thread | None = None
         self._bytes_queued = 0
         self._bytes_played = 0
         self._lock = threading.Lock()

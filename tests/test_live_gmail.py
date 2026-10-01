@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import threading
 
-from agents.types import AgentResult
 from integrations.google_errors import GoogleApiError
 from integrations.google_gmail import sanitize_email_text
 from tests.helpers_google import build_test_router

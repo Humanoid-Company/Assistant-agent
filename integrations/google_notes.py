@@ -10,7 +10,7 @@ import re
 import threading
 import uuid
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
@@ -874,7 +874,7 @@ class FakeNotesClient:
         meta = {
             "id": doc_id,
             "name": title,
-            "createdTime": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "createdTime": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             "appProperties": {APP_PROP_KEY: APP_PROP_VALUE},
         }
         self.files[doc_id] = meta

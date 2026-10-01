@@ -4,8 +4,8 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timedelta
-from typing import Callable
 from zoneinfo import ZoneInfo
 
 from agents.create_draft import (
@@ -134,7 +134,7 @@ _HOUR_WORDS: dict[str, int] = {
     "сьому": 7,
     "сьома": 7,
     "седьмую": 7,
-    "седьмую": 7,
+    "седьмая": 7,
     "восемь": 8,
     "вісім": 8,
     "восьму": 8,

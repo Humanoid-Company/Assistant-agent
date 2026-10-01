@@ -15,8 +15,9 @@ import logging
 import os
 import threading
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any, Iterator
+from typing import Any
 
 import httplib2
 from google_auth_httplib2 import AuthorizedHttp
