@@ -406,7 +406,11 @@ class LiveVoiceSession:
         now = time.monotonic()
         self._maybe_release_output_after_gap(now)
 
-        decision = self._barge_gate.feed_mic(chunk, assistant_or_cue_playing=playing)
+        decision = self._barge_gate.feed_mic(
+            chunk,
+            assistant_or_cue_playing=playing,
+            output_rms=self.player.recent_output_rms(),
+        )
 
         if decision.action == BargeInAction.DUCK:
             self._speech_onset_mono = now

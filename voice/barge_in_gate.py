@@ -13,8 +13,14 @@ from voice.local_vad import LocalSpeechDetector, VadTick
 
 logger = logging.getLogger(__name__)
 
-# Echo level smoothing per 30 ms frame (~0.4 s time constant).
-_ECHO_ALPHA = 0.08
+# Speaker→mic coupling (mic echo rms / playback rms). Starts cautious and is learned
+# from the session: laptop speakers measured ~0.05–0.1.
+_INITIAL_COUPLING = 0.15
+_MAX_COUPLING = 1.0
+_COUPLING_ALPHA = 0.05
+# Compare the mic's loudest recent frame with the loudest recent playback frame.
+_COUPLING_WINDOW_S = 0.5
+_MIN_OUTPUT_FOR_LEARNING = 300.0
 
 
 class BargeInState(str, Enum):
@@ -74,8 +80,11 @@ class BargeInGate:
         self.min_confirm_age_ms = max(80, min_confirm_age_ms)
         self.burst_reject_ms = max(100, burst_reject_ms)
         self.echo_margin = max(1.0, echo_margin)
-        # Running mic level while the assistant plays and nobody interrupts = speaker echo.
-        self._echo_rms = 0.0
+        # How loud the mic hears our own playback, relative to the playback level. Learned
+        # while the assistant talks and nobody interrupts; shared across sessions in-process.
+        self._coupling = BargeInGate._learned_coupling
+        self._output_rms = 0.0
+        self._mic_peaks: list[tuple[float, float]] = []
 
         self.state = BargeInState.IDLE
         self._candidate_started: float | None = None
@@ -108,27 +117,35 @@ class BargeInGate:
         self._cand_text = ""
         self.vad.reset()
 
+    # Speaker→mic coupling carried over to the next session (same room/device).
+    _learned_coupling: float = _INITIAL_COUPLING
+
     def feed_mic(
         self,
         pcm: bytes,
         *,
         assistant_or_cue_playing: bool,
+        output_rms: float = 0.0,
     ) -> BargeInDecision:
-        """Process mic audio while assistant/cue may be playing."""
+        """Process mic audio while assistant/cue may be playing.
+
+        `output_rms` is the loudest level just sent to the speakers; the expected echo is
+        that times the learned coupling, so the bar rises the moment the assistant starts
+        talking — before its voice even reaches the mic.
+        """
+        self._output_rms = output_rms
         update_ambient = not assistant_or_cue_playing and self.state == BargeInState.IDLE
         tick = self.vad.feed(pcm, update_ambient=update_ambient)
 
         if not assistant_or_cue_playing and self.state == BargeInState.IDLE:
-            self._echo_rms *= 0.8  # playback over -> echo fades out
             return BargeInDecision(state=self.state)
 
         if self.state == BargeInState.IDLE:
             decision = self._maybe_start_candidate(tick, assistant_or_cue_playing)
             if self.state == BargeInState.IDLE and assistant_or_cue_playing:
-                # Learn the echo only from audio that did not open a candidate, so the user's
-                # own first syllables never raise the bar against them.
-                for rms in tick.frame_rms_list or ((tick.rms,) if tick.rms else ()):
-                    self._echo_rms += _ECHO_ALPHA * (rms - self._echo_rms)
+                # Learn only from audio that did not open a candidate, so the user's own
+                # first syllables never raise the bar against them.
+                self._learn_coupling(tick)
             return decision
 
         if self.state == BargeInState.POSSIBLE:
@@ -180,11 +197,13 @@ class BargeInGate:
         too_quiet = self._energy_problem(tick.rms, assistant_playing)
         if too_quiet:
             logger.info(
-                "BARGE_IN rejected reason=%s rms=%.0f ambient=%.0f echo=%.0f",
+                "BARGE_IN rejected reason=%s rms=%.0f ambient=%.0f echo=%.0f out=%.0f coupling=%.3f",
                 too_quiet,
                 tick.rms,
                 tick.ambient_rms,
-                self._echo_rms,
+                self.expected_echo_rms,
+                self._output_rms,
+                self._coupling,
             )
             self.rejected_count += 1
             return BargeInDecision(
@@ -207,9 +226,10 @@ class BargeInGate:
         self._peak_rms = max(self._rms_hist) if self._rms_hist else tick.rms
         self.candidate_count += 1
         logger.info(
-            "BARGE_IN candidate source=vad rms=%.0f ambient=%.0f",
+            "BARGE_IN candidate source=vad rms=%.0f ambient=%.0f echo=%.0f",
             tick.rms,
             tick.ambient_rms,
+            self.expected_echo_rms,
         )
         logger.info("BARGE_IN ducked")
         return BargeInDecision(
@@ -297,9 +317,25 @@ class BargeInGate:
             assistant_playing=assistant_playing,
         ):
             return "low_energy"
-        if assistant_playing and rms < self._echo_rms * self.echo_margin:
+        if assistant_playing and rms < self.expected_echo_rms * self.echo_margin:
             return "echo_level"
         return None
+
+    @property
+    def expected_echo_rms(self) -> float:
+        return self._coupling * self._output_rms
+
+    def _learn_coupling(self, tick: VadTick) -> None:
+        now = time.monotonic()
+        loudest = max(tick.frame_rms_list or ((tick.rms,) if tick.rms else (0.0,)))
+        self._mic_peaks.append((now, loudest))
+        self._mic_peaks = [(at, r) for at, r in self._mic_peaks if at >= now - _COUPLING_WINDOW_S]
+        if self._output_rms < _MIN_OUTPUT_FOR_LEARNING:
+            return  # silence/quiet tail: no information about the coupling
+        mic_peak = max(r for _, r in self._mic_peaks)
+        ratio = min(mic_peak / self._output_rms, _MAX_COUPLING)
+        self._coupling += _COUPLING_ALPHA * (ratio - self._coupling)
+        BargeInGate._learned_coupling = self._coupling
 
     def _looks_like_non_speech_burst(self) -> bool:
         """High-energy simple burst (cough/clap) without speech-like modulation."""

@@ -375,34 +375,57 @@ def test_no_release_while_the_user_is_still_talking():
     assert session.player.queued_bytes == 0
 
 
-def _echo_gate() -> BargeInGate:
+_PLAYBACK_RMS = 3000.0  # assistant voice as sent to the speakers
+_MIC_ECHO_RMS = 250.0  # how loud the mic hears it (real logs: 180–375)
+
+
+def _echo_gate(*, learn_ticks: int = 40) -> BargeInGate:
+    BargeInGate._learned_coupling = 0.15  # fresh process
     gate = _gate(use_energy_gate=True, energy_margin_playing=3.0)
     gate.vad._ambient_rms = 12.0
-    # Assistant talking: the mic hears its voice from the speakers at ~200 rms.
     gate.vad.feed = lambda pcm, update_ambient=True: VadTick(  # type: ignore
-        onset=False, speaking=True, speech_frame=True, rms=200, ambient_rms=12, frames_ms=300,
-        frame_rms_list=(200.0,) * 10, frame_zcr_list=(0.1,) * 10,
+        onset=False, speaking=True, speech_frame=True, rms=_MIC_ECHO_RMS, ambient_rms=12,
+        frames_ms=30, frame_rms_list=(_MIC_ECHO_RMS,), frame_zcr_list=(0.1,),
     )
-    for _ in range(5):
-        gate.feed_mic(b"x", assistant_or_cue_playing=True)
+    for _ in range(learn_ticks):
+        gate.feed_mic(b"x", assistant_or_cue_playing=True, output_rms=_PLAYBACK_RMS)
     return gate
 
 
-def _onset(gate: BargeInGate, rms: float):
+def _onset(gate: BargeInGate, rms: float, *, output_rms: float = _PLAYBACK_RMS):
     gate.vad.feed = lambda pcm, update_ambient=True: VadTick(  # type: ignore
         onset=True, speaking=True, speech_frame=True, rms=rms, ambient_rms=12, frames_ms=30,
         frame_rms_list=(rms,), frame_zcr_list=(0.1,),
     )
-    return gate.feed_mic(b"x", assistant_or_cue_playing=True)
+    return gate.feed_mic(b"x", assistant_or_cue_playing=True, output_rms=output_rms)
 
 
 def test_own_voice_from_speakers_is_not_an_interruption():
-    """Real log: candidates at rms 182–215 while the assistant spoke (ambient 12) confirmed as
+    """Real log: candidates at rms 182–375 while the assistant spoke (ambient 12) confirmed as
     'sustained_speech' and cut the assistant off mid-answer."""
     gate = _echo_gate()
-    decision = _onset(gate, 215)
+    decision = _onset(gate, 375)
     assert decision.action == BargeInAction.NONE
     assert decision.reason == "echo_level"
+
+
+def test_echo_at_the_start_of_a_reply_after_a_pause_is_not_an_interruption():
+    """Real log: after a pause the learned echo level had decayed to ~4, so the first
+    syllables of the next reply (rms 375) cut it off. The bar now follows the playback level,
+    which is known before the sound even reaches the mic."""
+    gate = _echo_gate()
+    gate.vad.feed = lambda pcm, update_ambient=True: VadTick(  # type: ignore
+        onset=False, speaking=False, speech_frame=False, rms=10, ambient_rms=12, frames_ms=30,
+        frame_rms_list=(10.0,), frame_zcr_list=(0.0,),
+    )
+    for _ in range(50):  # long pause, nothing playing
+        gate.feed_mic(b"x", assistant_or_cue_playing=False, output_rms=0.0)
+    assert _onset(gate, 375).reason == "echo_level"
+
+
+def test_first_reply_of_a_session_is_protected_before_any_learning():
+    gate = _echo_gate(learn_ticks=0)
+    assert _onset(gate, 375).reason == "echo_level"
 
 
 def test_user_voice_over_the_echo_still_interrupts():
@@ -421,3 +444,12 @@ def test_audio_only_barge_in_lets_the_model_resume_if_nobody_spoke():
     session._connection = type("C", (), {"session": type("S", (), {"instructions": _Instructions()})()})()
     asyncio.run(session._steer_stop_speaking(uncertain=True))
     assert "continue your previous answer" in sent["content"]
+
+
+def test_player_reports_recent_output_level():
+    tracker = PlaybackTracker(sample_rate=24000)
+    assert tracker.recent_output_rms() == 0.0
+    tracker._note_output_level(_tone_pcm24(20, amp=3000))
+    assert 1500 < tracker.recent_output_rms() < 3000
+    tracker._out_levels[0] = (time.monotonic() - 5, tracker._out_levels[0][1])
+    assert tracker.recent_output_rms() == 0.0  # old audio no longer counts
