@@ -12,10 +12,10 @@ VoiceEngineName = Literal["live", "realtime"]
 
 
 def normalize_voice_engine(value: str | None) -> VoiceEngineName:
-    raw = (value or VOICE_ENGINE or "realtime").strip().lower()
-    if raw in ("live", "gpt-live", "gpt_live"):
-        return "live"
-    return "realtime"
+    raw = (value or VOICE_ENGINE or "live").strip().lower()
+    if raw in ("realtime", "gpt-realtime", "legacy"):
+        return "realtime"
+    return "live"  # the main engine; anything unrecognised falls back to it
 
 
 def create_voice_session(

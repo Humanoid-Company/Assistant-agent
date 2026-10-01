@@ -27,6 +27,7 @@ from config import (
     VOICE_BARGE_IN_ENERGY_MARGIN_PLAYING,
     VOICE_BARGE_IN_MIN_SPEECH_MS,
     VOICE_BARGE_IN_ONSET_FRAMES,
+    VOICE_BARGE_IN_REJECT_SILENCE_MS,
     VOICE_BARGE_IN_USE_ENERGY_GATE,
     VOICE_BUSY_CUE_DELAY_MS,
     VOICE_BUSY_CUE_MAX_PER_TURN,
@@ -35,13 +36,19 @@ from config import (
     VOICE_LOCAL_BARGE_IN,
 )
 from tools.executor import ToolExecutionContext, ToolExecutor
-from voice.barge_in_gate import BargeInAction, BargeInGate
+from voice.barge_in_gate import BargeInAction, BargeInGate, BargeInState
 from voice.busy_cues import BusyCueController
 from voice.delegation import extract_completed_function_call
+from voice.interrupt_intent import classify_interjection
 from voice.local_vad import LocalSpeechDetector
 from voice.playback import PlaybackTracker
 
 logger = logging.getLogger(__name__)
+
+# How much of the assistant's recent speech to compare mic transcripts against (echo check).
+_ECHO_CONTEXT_CHARS = 400
+# Words heard with no open barge-in candidate are judged together within this window.
+_IDLE_INTERJECTION_WINDOW_S = 2.0
 
 _SHUTDOWN_WAIT_S = 3.0
 
@@ -136,6 +143,7 @@ class LiveVoiceSession:
             use_energy_gate=VOICE_BARGE_IN_USE_ENERGY_GATE,
             energy_margin=VOICE_BARGE_IN_ENERGY_MARGIN,
             energy_margin_playing=VOICE_BARGE_IN_ENERGY_MARGIN_PLAYING,
+            reject_silence_ms=VOICE_BARGE_IN_REJECT_SILENCE_MS,
         )
         self._speech_onset_mono: float | None = None
         self._duck_volume = VOICE_BARGE_IN_DUCK_VOLUME
@@ -146,6 +154,10 @@ class LiveVoiceSession:
         self._last_output_delta_at = 0.0
         self._output_gap_ms = 220.0
         self._stale_response = False
+        # Echo detection context + words heard after a short candidate already ended.
+        self._recent_assistant_text = ""
+        self._idle_interjection = ""
+        self._idle_interjection_at = 0.0
 
         synth = cue_synthesize or _synthesize_cue_pcm
         self._busy_cues = BusyCueController(
@@ -410,6 +422,48 @@ class LiveVoiceSession:
                 reason=decision.reason,
             )
 
+    def _on_interjection(self, frag: str) -> None:
+        """User speech transcribed while the assistant talks: interrupt only on real intent
+        (stop word / taking the turn), never on backchannels, room chatter or echo."""
+        gate = self._barge_gate
+        recent = self._recent_assistant_text
+        if gate.state == BargeInState.POSSIBLE:
+            decision = gate.note_partial_transcript(frag, assistant_recent=recent)
+            if decision.action == BargeInAction.CONFIRM:
+                self._speech_onset_mono = self._speech_onset_mono or time.monotonic()
+                self._trigger_barge_in(
+                    source="transcript",
+                    speech_ms=decision.speech_ms,
+                    reason=decision.intent or decision.reason,
+                    short_ack=decision.intent == "stop",
+                )
+            elif decision.action == BargeInAction.REJECT:
+                self.player.set_volume(1.0)
+                self._speech_onset_mono = None
+            return
+        if not (self.player.is_playing or self._stale_response):
+            return
+        # No open candidate (it already ended, e.g. a short «стоп»): judge the words that
+        # arrived within the last couple of seconds.
+        now = time.monotonic()
+        if now - self._idle_interjection_at > _IDLE_INTERJECTION_WINDOW_S:
+            self._idle_interjection = ""
+        self._idle_interjection_at = now
+        self._idle_interjection += frag
+        intent = classify_interjection(self._idle_interjection, assistant_recent=recent)
+        # A takeover also needs local evidence of near-field speech; room chatter has none.
+        if intent == "stop" or (intent == "takeover" and gate.had_recent_candidate()):
+            self._idle_interjection = ""
+            self._speech_onset_mono = self._speech_onset_mono or now
+            forced = gate.force_confirm(source="transcript_keyword")
+            if forced.action == BargeInAction.CONFIRM:
+                self._trigger_barge_in(
+                    source="transcript_keyword",
+                    speech_ms=forced.speech_ms,
+                    reason=intent,
+                    short_ack=intent == "stop",
+                )
+
     def _invalidate_assistant_response(self, *, reason: str) -> None:
         """Hard-stop: old generation must never become audible again."""
         self._assistant_generation += 1
@@ -462,13 +516,8 @@ class LiveVoiceSession:
         self._invalidate_assistant_response(reason=source)
         self._last_barge_in_at = now
         self._barge_gate.reset()
-        # Interrupt keywords → steer to short ack only; else just stop & listen.
-        is_interrupt_cmd = short_ack or source in (
-            "transcript_keyword",
-            "partial_transcript",
-            "transcript",
-        ) or reason in ("transcript", "partial_transcript_hint", "transcript_keyword")
-        self._schedule_steer_stop(short_ack=is_interrupt_cmd)
+        # Stop word → one short ack («Добре.»); user taking the turn → just stop and listen.
+        self._schedule_steer_stop(short_ack=short_ack)
         logger.info(
             "BARGE_IN playback_stopped latency_ms=%s barge_in_latency_ms=%s "
             "speech_ms=%.0f source=%s generation=%s candidates=%s confirmed=%s rejected=%s",
@@ -576,55 +625,8 @@ class LiveVoiceSession:
             frag = _event_attr(event, "delta") or ""
             if isinstance(frag, str) and frag.strip():
                 playing = self.player.is_playing or self._busy_cues.cue_playing or self._stale_response
-                if playing or self._barge_gate.state.value == "possible_barge_in":
-                    decision = self._barge_gate.note_partial_transcript(frag)
-                    if decision.action == BargeInAction.CONFIRM:
-                        self._speech_onset_mono = self._speech_onset_mono or time.monotonic()
-                        low = frag.strip().lower()
-                        short = any(
-                            h in low
-                            for h in (
-                                "стоп",
-                                "зачекай",
-                                "почекай",
-                                "тихо",
-                                "досить",
-                                "не треба",
-                                "секунду",
-                            )
-                        )
-                        self._trigger_barge_in(
-                            source="transcript",
-                            speech_ms=decision.speech_ms,
-                            reason=decision.reason,
-                            short_ack=short,
-                        )
-                    elif (
-                        decision.action == BargeInAction.NONE
-                        and self._barge_gate.state.value == "idle"
-                        and (self.player.is_playing or self._stale_response)
-                    ):
-                        low = frag.strip().lower()
-                        if any(
-                            h in low
-                            for h in (
-                                "стоп",
-                                "зачекай",
-                                "почекай",
-                                "тихо",
-                                "досить",
-                                "не треба",
-                            )
-                        ):
-                            self._speech_onset_mono = self._speech_onset_mono or time.monotonic()
-                            forced = self._barge_gate.force_confirm(source="transcript_keyword")
-                            if forced.action == BargeInAction.CONFIRM:
-                                self._trigger_barge_in(
-                                    source="transcript_keyword",
-                                    speech_ms=forced.speech_ms,
-                                    reason="transcript",
-                                    short_ack=True,
-                                )
+                if playing or self._barge_gate.state == BargeInState.POSSIBLE:
+                    self._on_interjection(frag)
             self._input_buf += frag
             if self._on_user_transcript:
                 try:
@@ -639,6 +641,7 @@ class LiveVoiceSession:
                 return
             frag = _event_attr(event, "delta") or ""
             self._output_buf += frag
+            self._recent_assistant_text = (self._recent_assistant_text + frag)[-_ECHO_CONTEXT_CHARS:]
             return
         if etype == "session.delegation.created":
             delegation = _event_attr(event, "delegation")

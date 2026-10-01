@@ -4,13 +4,14 @@
 
 ## Що робить
 
-Голосовий асистент: wake word → **voice engine** (`VOICE_ENGINE=realtime` або `live`) →
+Голосовий асистент: wake word → **voice engine** (`VOICE_ENGINE=live` — основний, або `realtime` — запасний) →
 локальний **Agent Router** → **Google Calendar / Gmail / нотатки (Drive+Docs)** через OAuth Desktop flow.
 n8n і зовнішній `agent-ecosystem` **не потрібні**.
 
-- **realtime** (за замовчуванням): legacy OpenAI Realtime — Calendar + Gmail + Notes.
-- **live**: GPT-Live (`gpt-live-1`) + Responses delegation — Calendar + Gmail + Notes
-  (`notes_add`, `notes_read`, `notes_search`, …).
+- **live** (за замовчуванням): GPT-Live (`gpt-live-1`) + Responses delegation — Calendar + Gmail + Notes
+  (`notes_add`, `notes_read`, `notes_search`, …). Перебивається лише на справжній намір
+  (стоп-слово або людина перехоплює слово), а не на «угу», фоновий шум чи ехо.
+- **realtime**: legacy OpenAI Realtime — запасний варіант.
 
 Користувач входить своїм Google-акаунтом у системному браузері. Один Google Cloud Project
 належить розробнику застосунку; кінцевий користувач не створює workflow і не вводить API-ключі.
@@ -61,13 +62,12 @@ credentials/client_secret.json
 ### 3. Запуск асистента
 
 ```bash
-# Legacy Realtime (default) — Calendar + Gmail + Notes
+# GPT-Live (default) — Calendar + Gmail + Notes
 uv run python main.py
 
-# GPT-Live — Calendar + Gmail + Notes
-# set VOICE_ENGINE=live in .env, or:
+# Legacy Realtime (fallback) — set VOICE_ENGINE=realtime in .env, or
 # Windows PowerShell:
-$env:VOICE_ENGINE="live"; uv run python main.py
+$env:VOICE_ENGINE="realtime"; uv run python main.py
 ```
 
 Скажіть «привіт», потім «підключи Google» — відкриється браузер, оберіть акаунт і
@@ -84,14 +84,15 @@ Refresh tokens зберігаються в **OS keyring** (не в спільн�
 | Змінна | Навіщо |
 |---|---|
 | `OPENAI_API_KEY` | обов'язково |
-| `VOICE_ENGINE` | `realtime` (default) або `live` |
+| `VOICE_ENGINE` | `live` (default) або `realtime` (запасний legacy) |
 | `OPENAI_LIVE_MODEL` | default `gpt-live-1` |
 | `OPENAI_LIVE_BACKEND_MODEL` | Responses backend (default `gpt-6-luna`) |
 | `OPENAI_LIVE_VOICE` | Live TTS voice (default `marin`) |
 | `OPENAI_LIVE_AUDIO_RATE` | default `24000` |
 | `VOICE_LOCAL_BARGE_IN` | локальний VAD barge-in (default `true`) |
-| `VOICE_BARGE_IN_CONFIRM_MS` | вікно підтвердження після duck (default `250`) |
-| `VOICE_BARGE_IN_MIN_SPEECH_MS` | мін. тривалість мови для confirm (default `180`) |
+| `VOICE_BARGE_IN_CONFIRM_MS` | скільки чекати доказів наміру перебити після duck (default `1200`) |
+| `VOICE_BARGE_IN_MIN_SPEECH_MS` | перебивання лише за звуком, без транскрипції: стільки безперервної мови (default `600`) |
+| `VOICE_BARGE_IN_REJECT_SILENCE_MS` | тиша, що закриває короткий звук; покриває паузи між словами (default `300`) |
 | `VOICE_BUSY_CUES_ENABLED` | короткі «Угу.» під час довгих tools (default `true`) |
 | `REALTIME_SILENCE_MS` | пауза, що завершує репліку в realtime (default `600`); менше = швидша відповідь, але може обрізати |
 | `GOOGLE_HTTP_TIMEOUT_S` | таймаут одного запиту до Google API (default `15`) |
@@ -117,7 +118,8 @@ Refresh tokens зберігаються в **OS keyring** (не в спільн�
 
 ```bash
 .\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scriptsuff.exe check .      # lint (також як pre-commit hook)
+.\.venv\Scripts
+uff.exe check .      # lint (також як pre-commit hook)
 .\.venv\Scripts\mypy.exe .            # типи (поки інформативно, не блокує)
 ```
 

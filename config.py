@@ -28,10 +28,9 @@ PID_FILE: Path = _ROOT / "assistant.pid"
 LANGUAGE_BCP47: str = "uk-UA"
 
 # ── Voice engine selection ────────────────────────────────────────────────────
-# Conservative default: keep the existing Realtime path unless explicitly opted in.
-# VOICE_ENGINE=live  → GPT-Live (gpt-live-1) + Responses delegation
-# VOICE_ENGINE=realtime → legacy Realtime (unchanged)
-VOICE_ENGINE: str = os.getenv("VOICE_ENGINE", "realtime").strip().lower()
+# VOICE_ENGINE=live  → GPT-Live (gpt-live-1) + Responses delegation (default)
+# VOICE_ENGINE=realtime → legacy Realtime, kept as a fallback
+VOICE_ENGINE: str = os.getenv("VOICE_ENGINE", "live").strip().lower()
 
 # ── OpenAI Realtime API (legacy) ──────────────────────────────────────────────
 REALTIME_MODEL: str = "gpt-realtime"
@@ -61,10 +60,18 @@ VOICE_BARGE_IN_ONSET_FRAMES: int = int(os.getenv("VOICE_BARGE_IN_ONSET_FRAMES", 
 VOICE_BARGE_IN_COOLDOWN_MS: int = int(os.getenv("VOICE_BARGE_IN_COOLDOWN_MS", "500"))
 # After confirmed barge-in, drop server output audio until local silence (ms).
 VOICE_BARGE_IN_SUPPRESS_MS: int = int(os.getenv("VOICE_BARGE_IN_SUPPRESS_MS", "400"))
-# Two-stage gate: duck first, confirm after sustained speech / energy / partial ASR.
-VOICE_BARGE_IN_CONFIRM_MS: int = int(os.getenv("VOICE_BARGE_IN_CONFIRM_MS", "250"))
-VOICE_BARGE_IN_MIN_SPEECH_MS: int = int(os.getenv("VOICE_BARGE_IN_MIN_SPEECH_MS", "180"))
-VOICE_BARGE_IN_DUCK_VOLUME: float = float(os.getenv("VOICE_BARGE_IN_DUCK_VOLUME", "0.3"))
+# Two-stage gate: duck first, then confirm only on real intent to interrupt — a stop word
+# or the user taking the turn (partial transcript), or sustained speech when ASR lags.
+# Backchannels («угу», «ага»), coughs, room chatter and echo restore the volume instead.
+# Window a ducked candidate may stay open waiting for that evidence.
+VOICE_BARGE_IN_CONFIRM_MS: int = int(os.getenv("VOICE_BARGE_IN_CONFIRM_MS", "1200"))
+# Audio-only confirm (no transcript yet): this much continuous speech. Longer than any
+# «угу»/«ага»/laugh, shorter than a real sentence.
+VOICE_BARGE_IN_MIN_SPEECH_MS: int = int(os.getenv("VOICE_BARGE_IN_MIN_SPEECH_MS", "600"))
+# Silence that ends a short candidate; long enough to span pauses between words.
+VOICE_BARGE_IN_REJECT_SILENCE_MS: int = int(os.getenv("VOICE_BARGE_IN_REJECT_SILENCE_MS", "300"))
+# Duck only gently: a false candidate should be barely noticeable.
+VOICE_BARGE_IN_DUCK_VOLUME: float = float(os.getenv("VOICE_BARGE_IN_DUCK_VOLUME", "0.5"))
 VOICE_BARGE_IN_USE_ENERGY_GATE: bool = os.getenv(
     "VOICE_BARGE_IN_USE_ENERGY_GATE", "true"
 ).lower() in ("1", "true", "yes")

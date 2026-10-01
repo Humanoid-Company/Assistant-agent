@@ -8,6 +8,7 @@ from enum import Enum
 
 import numpy as np
 
+from voice.interrupt_intent import classify_interjection
 from voice.local_vad import LocalSpeechDetector, VadTick
 
 logger = logging.getLogger(__name__)
@@ -26,24 +27,6 @@ class BargeInAction(str, Enum):
     REJECT = "reject"
 
 
-# Partial-transcript hints (Ukrainian) — secondary confirm, not keyword-only.
-_STRONG_HINTS = (
-    "стоп",
-    "зачекай",
-    "секунду",
-    "почекай",
-    "тихо",
-    "ні",
-    "та ні",
-    "слухай",
-    "а ще",
-    "скажи",
-    "чекай",
-    "досить",
-    "не треба",
-)
-
-
 @dataclass
 class BargeInDecision:
     action: BargeInAction = BargeInAction.NONE
@@ -51,6 +34,8 @@ class BargeInDecision:
     reason: str = ""
     speech_ms: float = 0.0
     duration_ms: float = 0.0
+    # From the transcript classifier: stop | takeover | backchannel | echo | unclear | "".
+    intent: str = ""
 
 
 class BargeInGate:
@@ -69,6 +54,8 @@ class BargeInGate:
         reject_silence_ms: int = 120,
         # Audio-only confirm needs wall-clock age (avoids cough confirming in <100ms).
         min_confirm_age_ms: int = 160,
+        # Cough/clap-like bursts are dropped this fast, independent of the longer window.
+        burst_reject_ms: int = 300,
     ) -> None:
         self.vad = vad
         self.confirm_ms = max(100, confirm_ms)
@@ -79,6 +66,7 @@ class BargeInGate:
         self.energy_margin_playing = energy_margin_playing
         self.reject_silence_ms = max(40, reject_silence_ms)
         self.min_confirm_age_ms = max(80, min_confirm_age_ms)
+        self.burst_reject_ms = max(100, burst_reject_ms)
 
         self.state = BargeInState.IDLE
         self._candidate_started: float | None = None
@@ -90,6 +78,8 @@ class BargeInGate:
         self._zcr_hist: list[float] = []
         self._speech_frames = 0
         self._peak_rms = 0.0
+        self._cand_text = ""
+        self._last_candidate_at = 0.0
 
         self.candidate_count = 0
         self.confirmed_count = 0
@@ -106,6 +96,7 @@ class BargeInGate:
         self._zcr_hist.clear()
         self._speech_frames = 0
         self._peak_rms = 0.0
+        self._cand_text = ""
         self.vad.reset()
 
     def feed_mic(
@@ -129,21 +120,32 @@ class BargeInGate:
 
         return BargeInDecision(state=self.state)
 
-    def note_partial_transcript(self, frag: str) -> BargeInDecision:
-        """Secondary confirm — ASR evidence that this is real speech, not a cough."""
+    def note_partial_transcript(self, frag: str, *, assistant_recent: str = "") -> BargeInDecision:
+        """Transcript evidence for the open candidate: only a stop word or a real takeover
+        confirms; listener backchannels and the assistant's own echo reject it."""
         if self.state != BargeInState.POSSIBLE:
             return BargeInDecision(state=self.state)
-        text = (frag or "").strip().lower()
-        if not text:
+        if not (frag or "").strip():
             return BargeInDecision(state=self.state)
-        self._partial_boost = True
-        if any(h in text for h in _STRONG_HINTS):
+        self._cand_text += frag
+        intent = classify_interjection(self._cand_text, assistant_recent=assistant_recent)
+        if intent in ("stop", "takeover"):
             self._strong_hint = True
-            return self._confirm(reason="transcript")
-        # Any partial transcript is strong anti-cough evidence.
-        if self._speech_ms >= 60 or len(text) >= 2:
-            return self._confirm(reason="transcript")
-        return BargeInDecision(action=BargeInAction.NONE, state=self.state)
+            decision = self._confirm(reason="transcript")
+            decision.intent = intent
+            return decision
+        if intent in ("backchannel", "echo"):
+            decision = self._reject(reason=intent)
+            decision.intent = intent
+            return decision
+        # Real words but not enough yet — speech, not a cough; keep listening.
+        self._partial_boost = True
+        return BargeInDecision(action=BargeInAction.NONE, state=self.state, intent=intent)
+
+    def had_recent_candidate(self, window_s: float = 1.5) -> bool:
+        """Near-field speech (passed the energy gate) started recently. Distinguishes the
+        user from far-away room chatter whose words still reach the transcript."""
+        return self._last_candidate_at > 0 and time.monotonic() - self._last_candidate_at <= window_s
 
     def force_confirm(self, *, source: str) -> BargeInDecision:
         """Used by explicit paths that already decided to interrupt."""
@@ -178,6 +180,7 @@ class BargeInGate:
             )
         self.state = BargeInState.POSSIBLE
         self._candidate_started = time.monotonic()
+        self._last_candidate_at = self._candidate_started
         # Count only real processed frames — do NOT pad with onset_needed*30
         # (that made coughs confirm in ~78ms wall-clock with speech_ms=180).
         self._speech_ms = float(tick.frames_ms)
@@ -238,10 +241,8 @@ class BargeInGate:
         burst = self._looks_like_non_speech_burst()
         speech_like = self._looks_like_speech()
 
-        # Transcript path is handled in note_partial_transcript (fast confirm).
+        # Transcript decisions happen in note_partial_transcript.
         if self._strong_hint:
-            return self._confirm(reason="transcript")
-        if self._partial_boost and self._speech_ms >= 60:
             return self._confirm(reason="transcript")
 
         # Audio-only confirm: need duration + speech-likeness + wall-clock age.
@@ -254,7 +255,7 @@ class BargeInGate:
         ):
             return self._confirm(reason="sustained_speech")
 
-        if burst and age_ms >= self.confirm_ms and not self._partial_boost:
+        if burst and age_ms >= self.burst_reject_ms and not self._partial_boost:
             return self._reject(reason="non_speech_burst")
 
         if self._silence_ms >= self.reject_silence_ms and self._speech_ms < self.min_speech_ms:
@@ -343,6 +344,7 @@ class BargeInGate:
         self._zcr_hist.clear()
         self._speech_frames = 0
         self._peak_rms = 0.0
+        self._cand_text = ""
         return decision
 
     def _reject(self, *, reason: str) -> BargeInDecision:
@@ -365,5 +367,6 @@ class BargeInGate:
         self._zcr_hist.clear()
         self._speech_frames = 0
         self._peak_rms = 0.0
+        self._cand_text = ""
         self.vad.reset()
         return decision

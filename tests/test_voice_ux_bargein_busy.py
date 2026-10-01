@@ -298,8 +298,10 @@ def test_false_candidate_restores_volume():
     )
     session._maybe_local_barge_in(_tone_pcm24(30))
     assert session.player.volume < 1.0
+    # Silence long enough to end the candidate (VOICE_BARGE_IN_REJECT_SILENCE_MS, 300 ms) —
+    # shorter gaps are treated as pauses between words.
     session._barge_gate.vad.feed = lambda pcm, update_ambient=True: VadTick(  # type: ignore
-        onset=False, speaking=False, speech_frame=False, rms=40, ambient_rms=200, frames_ms=120
+        onset=False, speaking=False, speech_frame=False, rms=40, ambient_rms=200, frames_ms=320
     )
     session._maybe_local_barge_in(_tone_pcm24(30))
     assert session.player.volume == 1.0
