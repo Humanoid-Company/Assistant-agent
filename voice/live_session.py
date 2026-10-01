@@ -49,6 +49,8 @@ logger = logging.getLogger(__name__)
 _ECHO_CONTEXT_CHARS = 400
 # Words heard with no open barge-in candidate are judged together within this window.
 _IDLE_INTERJECTION_WINDOW_S = 2.0
+# After a barge-in, drop the old answer's audio at most this long (once the user is quiet).
+_STALE_DROP_MAX_S = 1.5
 
 _SHUTDOWN_WAIT_S = 3.0
 
@@ -153,6 +155,8 @@ class LiveVoiceSession:
         self._awaiting_output_gap = False
         self._last_output_delta_at = 0.0
         self._output_gap_ms = 220.0
+        self._barge_in_mono = 0.0
+        self._stale_dropped_chunks = 0
         self._stale_response = False
         # Echo detection context + words heard after a short candidate already ended.
         self._recent_assistant_text = ""
@@ -465,10 +469,12 @@ class LiveVoiceSession:
                 )
 
     def _invalidate_assistant_response(self, *, reason: str) -> None:
-        """Hard-stop: old generation must never become audible again."""
+        """Stop the current answer now; _maybe_release_output_after_gap decides when audio resumes."""
         self._assistant_generation += 1
         self._play_assistant_audio = False
         self._awaiting_output_gap = True
+        self._barge_in_mono = time.monotonic()
+        self._stale_dropped_chunks = 0
         self._stale_response = True
         self._last_output_delta_at = time.monotonic()
         self.player.interrupt()
@@ -481,7 +487,14 @@ class LiveVoiceSession:
         )
 
     def _maybe_release_output_after_gap(self, now: float | None = None) -> None:
-        """After barge-in, allow NEW audio only once the old stream goes quiet."""
+        """After a barge-in, let assistant audio play again.
+
+        Live output audio carries no response id, so old and new speech can't be told apart
+        directly. Release when the old stream pauses (gap), or — because the model often
+        flows straight from the old answer into the reply to the interruption without a
+        pause — once the user has stopped talking and a short window has passed. Waiting
+        only for a gap could mute the assistant for its whole next answer.
+        """
         if not self._awaiting_output_gap or self._play_assistant_audio:
             return
         now = now if now is not None else time.monotonic()
@@ -489,15 +502,25 @@ class LiveVoiceSession:
             self._last_output_delta_at = now
             return
         gap_ms = (now - self._last_output_delta_at) * 1000.0
+        waited_s = now - self._barge_in_mono if self._barge_in_mono else 0.0
         if gap_ms >= self._output_gap_ms:
-            self._play_assistant_audio = True
-            self._awaiting_output_gap = False
-            self._stale_response = False
-            logger.info(
-                "RESPONSE new_generation generation=%s gap_ms=%.0f",
-                self._assistant_generation,
-                gap_ms,
-            )
+            reason = "gap"
+        elif waited_s >= _STALE_DROP_MAX_S and not self._vad.speaking:
+            reason = "max_wait"
+        else:
+            return
+        self._play_assistant_audio = True
+        self._awaiting_output_gap = False
+        self._stale_response = False
+        logger.info(
+            "RESPONSE new_generation generation=%s reason=%s gap_ms=%.0f waited_s=%.1f dropped_chunks=%s",
+            self._assistant_generation,
+            reason,
+            gap_ms,
+            waited_s,
+            self._stale_dropped_chunks,
+        )
+        self._stale_dropped_chunks = 0
 
     def _trigger_barge_in(
         self,
@@ -604,10 +627,9 @@ class LiveVoiceSession:
             now = time.monotonic()
             if not self._output_accepted():
                 self._last_output_delta_at = now
-                logger.info(
-                    "RESPONSE stale_delta_dropped generation=%s",
-                    self._assistant_generation,
-                )
+                if self._stale_dropped_chunks == 0:
+                    logger.info("RESPONSE stale_audio_dropping generation=%s", self._assistant_generation)
+                self._stale_dropped_chunks += 1
                 return
             # Final/assistant audio must not overlap a thinking cue.
             if self.player.playing_kind == "cue" or self._busy_cues.cue_playing:

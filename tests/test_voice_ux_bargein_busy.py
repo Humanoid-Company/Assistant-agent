@@ -341,3 +341,35 @@ def test_local_speech_detector_reset():
     det._speaking = True
     det.reset()
     assert not det.speaking
+
+
+def _stream_delta(session: LiveVoiceSession) -> None:
+    pcm = base64.b64encode(b"\x00\x01" * 30).decode("ascii")
+    asyncio.run(session._handle_event({"type": "session.output_audio.delta", "delta": pcm}))
+
+
+def test_continuous_stream_after_barge_in_is_not_muted_forever():
+    """Real log: the model flowed straight from the old answer into the reply to the
+    interruption without any pause, so a gap-only release muted it for 23 s."""
+    session = _session()
+    session._last_barge_in_at = 0.0
+    session._trigger_barge_in(source="vad_confirmed")
+    _stream_delta(session)  # old answer keeps streaming right away → dropped
+    assert session.player.queued_bytes == 0
+
+    session._barge_in_mono -= 2.0  # 2 s later, deltas still arriving back-to-back
+    session._last_output_delta_at = time.monotonic()
+    _stream_delta(session)
+    assert session.player.queued_bytes > 0  # the assistant is audible again
+    assert session._stale_dropped_chunks == 0
+
+
+def test_no_release_while_the_user_is_still_talking():
+    session = _session()
+    session._last_barge_in_at = 0.0
+    session._trigger_barge_in(source="vad_confirmed")
+    session._barge_in_mono -= 2.0
+    session._last_output_delta_at = time.monotonic()
+    session._vad._speaking = True  # user still mid-sentence
+    _stream_delta(session)
+    assert session.player.queued_bytes == 0
