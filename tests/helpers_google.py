@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from google.oauth2.credentials import Credentials
+
 from agents.calendar_agent import CalendarAgent
 from agents.gmail_agent import GmailAgent
 from agents.notes_agent import NotesAgent
@@ -12,7 +14,6 @@ from auth.account_manager import AccountManager
 from auth.google_oauth import GoogleIdentity, GoogleOAuthClient, OAuthError, granted_scopes
 from auth.scopes import CALENDAR_SCOPES, GMAIL_SCOPES, IDENTITY_SCOPES, NOTES_SCOPES
 from auth.token_store import InMemoryTokenStore
-from google.oauth2.credentials import Credentials
 from integrations.google_calendar import FakeCalendarClient
 from integrations.google_gmail import FakeGmailClient
 from integrations.google_notes import FakeNotesClient

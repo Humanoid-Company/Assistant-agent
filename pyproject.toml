@@ -8,11 +8,10 @@ dependencies = [
     "SpeechRecognition>=3.10.0",
     "sounddevice>=0.4.6",
     "pygame-ce>=2.5.0",
-    "webrtcvad>=2.0.10",
+    "webrtcvad-wheels>=2.0.14",
     "numpy>=1.24.0,<2",
     "python-dotenv>=1.0.0",
     "httpx>=0.28.0",
-    "setuptools<81",
     "google-auth>=2.29.0",
     "google-auth-oauthlib>=1.2.0",
     "google-api-python-client>=2.127.0",
@@ -21,6 +20,50 @@ dependencies = [
 ]
 
 [dependency-groups]
+# Hosted web backend (server/): `uv sync --group server`
+server = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+]
 dev = [
     "pytest>=8.2",
+    "ruff>=0.6",
+    "mypy>=1.11",
 ]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+extend-exclude = [".venv", "credentials", "data"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+ignore = [
+    "E501",   # long Ukrainian prompt strings are intentional
+    "SIM105", # try/except/pass is clearer than contextlib.suppress in audio paths
+    "SIM102", # nested ifs often carry a comment per condition
+    "SIM103",
+    "SIM108",
+    "UP042",  # str+Enum kept for JSON/log compatibility
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+check_untyped_defs = false
+warn_unused_ignores = true
+exclude = ['^\.venv/', '^tests/']
+
+# Mixins use attributes/methods set up by the concrete class (CalendarAgent / Assistant).
+[[tool.mypy.overrides]]
+module = [
+    "agents.calendar_create",
+    "agents.calendar_edit",
+    "agents.calendar_execution",
+    "voice.realtime_driver",
+    "voice.live_driver",
+]
+disable_error_code = ["attr-defined"]

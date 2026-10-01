@@ -1,7 +1,9 @@
 """Voice session abstraction — assistant must not depend on Realtime/Live event names."""
 from __future__ import annotations
 
-from typing import Callable, Optional, Protocol, runtime_checkable
+from collections.abc import Callable
+from enum import Enum, auto
+from typing import Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -58,3 +60,9 @@ class VoiceSession(Protocol):
     def voice_restart_requested(self) -> bool:
         """True when voice change requires a new session (Live) or process exit (Realtime)."""
         ...
+
+
+class State(Enum):
+    """Assistant state machine: waiting for the wake phrase, or in a voice session."""
+    SLEEPING = auto()
+    AWAKE = auto()

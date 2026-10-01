@@ -7,7 +7,6 @@ from pathlib import Path
 
 from agents.types import AgentResult
 from assistant import TOOLS, _parse_router_reply
-from robot_control import StubBackend, create_robot_controller
 from tests.helpers_google import build_test_router
 
 
@@ -26,14 +25,13 @@ def test_tools_include_google_typed_actions_not_n8n_only():
     assert "gmail_action" in names
     assert "google_account" in names
     assert "dispatch_task" in names
-    assert "control_robot" in names
 
 
-def test_stub_robot_still_works():
-    robot = create_robot_controller("stub", "")
-    assert isinstance(robot, StubBackend)
-    robot.move_forward()
-    robot.stop()
+def test_assistant_has_no_robot_tools():
+    from tools.live_schemas import LIVE_BACKEND_TOOLS
+
+    assert "control_robot" not in {t["name"] for t in TOOLS}
+    assert "control_robot" not in {t["name"] for t in LIVE_BACKEND_TOOLS}
 
 
 def test_gitignore_covers_secrets():

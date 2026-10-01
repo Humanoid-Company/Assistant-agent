@@ -5,8 +5,8 @@ import asyncio
 from unittest.mock import MagicMock, patch
 
 import httpx
-import pytest
 
+from agents.types import AgentResult
 from integrations.web_search import (
     HARD_MAX_RESULTS,
     FakeWebSearchProvider,
@@ -22,7 +22,6 @@ from tools.executor import ToolExecutionContext, ToolExecutor
 from tools.gmail_tools import GmailToolWrappers
 from tools.live_schemas import LIVE_BACKEND_TOOLS
 from tools.notes_tools import NotesToolWrappers
-from agents.types import AgentResult
 
 
 def test_clamp_max_results():

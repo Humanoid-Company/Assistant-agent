@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from typing import Awaitable, Callable, Optional, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +16,7 @@ DEFAULT_BUSY_CUE_PHRASES: tuple[str, ...] = (
 )
 
 PlayCueFn = Callable[[str, bytes], Awaitable[None] | None]
-SynthesizeFn = Callable[[str], Optional[bytes]]
+SynthesizeFn = Callable[[str], bytes | None]
 
 
 class BusyCueController:
@@ -161,7 +161,7 @@ class BusyCueController:
         choices = [p for p in self._phrases if p != self._last_phrase] or list(self._phrases)
         return random.choice(choices)
 
-    def _pcm_for(self, phrase: str) -> Optional[bytes]:
+    def _pcm_for(self, phrase: str) -> bytes | None:
         cached = self._pcm_cache.get(phrase)
         if cached:
             return cached

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Callable
+from collections.abc import Callable
 
 from agents.types import AgentResult, result_from_google_error
 from auth.account_manager import AccountManager

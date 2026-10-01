@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Голосовий агент</title>
+  <meta name="description" content="Тестова веб-версія голосового агента: календар, пошта, нотатки, пошук.">
+  <link rel="stylesheet" href="style.css">
+  <script src="config.js"></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <main class="wrap">
+    <header>
+      <h1>Голосовий агент</h1>
+      <p class="sub">Тестова версія для команди. Натисніть «Почати розмову» і говоріть — як з людиною.</p>
+    </header>
+
+    <section id="gate" class="card" hidden>
+      <label for="code">Код доступу</label>
+      <div class="row">
+        <input id="code" type="password" autocomplete="off" placeholder="Отримайте в команди">
+        <button id="saveCode" class="btn">Зберегти</button>
+      </div>
+    </section>
+
+    <section class="card call">
+      <div class="status-line">
+        <span id="dot" class="dot" aria-hidden="true"></span>
+        <span id="status">Не підключено</span>
+      </div>
+      <button id="talk" class="btn primary big">Почати розмову</button>
+      <p class="hint">Краще в навушниках або в тихій кімнаті. Браузер попросить доступ до мікрофона.</p>
+    </section>
+
+    <section class="card">
+      <div class="google-head">
+        <h2>Google</h2>
+        <span id="googleState" class="pill">не підключено</span>
+      </div>
+      <p id="googleInfo" class="muted">Підключіть акаунт, щоб агент бачив ваш календар, пошту й нотатки.</p>
+      <div class="row">
+        <button id="googleConnect" class="btn">Підключити Google</button>
+        <button id="googleDisconnect" class="btn ghost" hidden>Відключити</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Розмова</h2>
+      <div id="log" class="log" aria-live="polite">
+        <p class="muted empty">Тут з'являтиметься текст розмови.</p>
+      </div>
+    </section>
+
+    <footer class="muted small">Дані Google зберігаються лише в пам'яті сервера на час тестування.</footer>
+  </main>
+  <audio id="remote" autoplay></audio>
+</body>
+</html>

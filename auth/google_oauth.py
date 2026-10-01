@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
@@ -17,6 +18,9 @@ from auth.scopes import IDENTITY_SCOPES, scope_labels
 from auth.token_store import TokenStore, TokenStoreError
 
 logger = logging.getLogger(__name__)
+
+# How long the browser consent may stay open before the attempt is given up.
+OAUTH_CONSENT_TIMEOUT_S = int(os.getenv("OAUTH_CONSENT_TIMEOUT_S", "600"))
 
 
 class OAuthError(Exception):
@@ -94,6 +98,8 @@ class GoogleOAuthClient:
             credentials = flow.run_local_server(
                 port=0,
                 open_browser=self._open_browser,
+                # A closed browser tab must not leave the login waiting forever.
+                timeout_seconds=OAUTH_CONSENT_TIMEOUT_S,
                 authorization_prompt_message="",
                 success_message="Авторизацію завершено. Можна закрити вкладку й повернутися до асистента.",
             )
@@ -248,7 +254,7 @@ class GoogleOAuthClient:
                 + labels
                 + ". Скажіть «дай доступ до "
                 + labels
-                + "» або використайте google_account (grant_gmail / grant_notes), щоб відкрити браузер.",
+                + "» — одне вікно Google додасть усі відсутні дозволи (google_account grant_all).",
                 missing_scopes=missing,
             )
         return credentials

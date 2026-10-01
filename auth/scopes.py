@@ -1,4 +1,4 @@
-"""Minimal OAuth scopes — identity first; Calendar/Gmail/Notes granted independently."""
+"""OAuth scopes. Connect asks for all of them at once; each is still checked per feature."""
 
 from __future__ import annotations
 
@@ -37,6 +37,10 @@ NOTES_SCOPES: tuple[str, ...] = DRIVE_FILE_SCOPES
 ALL_KNOWN_SCOPES: tuple[str, ...] = (
     IDENTITY_SCOPES + CALENDAR_SCOPES + GMAIL_SCOPES + NOTES_SCOPES
 )
+
+# Everything the agent uses — asked for in ONE consent screen when a user connects or
+# switches, so they grant once instead of being prompted again per feature later.
+FULL_ACCESS_SCOPES: tuple[str, ...] = CALENDAR_SCOPES + GMAIL_SCOPES + NOTES_SCOPES
 
 
 def scope_labels(missing: list[str] | tuple[str, ...]) -> str:

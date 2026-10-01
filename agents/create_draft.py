@@ -12,7 +12,6 @@ import unicodedata
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 
-
 DEFAULT_DRAFT_TTL_S = 600.0  # 10 minutes for an unfinished create
 
 _YES_TITLE = re.compile(

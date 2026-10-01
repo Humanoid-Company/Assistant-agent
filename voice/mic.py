@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import logging
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import sounddevice as sd
 
-from config import CHANNELS, CHUNK_SIZE, SAMPLE_RATE
+from config import CHANNELS, CHUNK_SIZE
 from realtime_client import resample_16k_to_24k
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,7 @@ class LiveMicCapture:
 
     def __init__(self, fallback_read_chunk: Callable[[], bytes]) -> None:
         self._fallback = fallback_read_chunk
-        self._stream: Optional[sd.RawInputStream] = None
+        self._stream: sd.RawInputStream | None = None
         self._native_24k = False
 
     def open(self) -> None:

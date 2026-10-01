@@ -7,7 +7,6 @@ before that session exists.
 """
 import io
 import logging
-from typing import Optional
 
 import pygame
 from openai import OpenAI
@@ -38,7 +37,7 @@ class TextToSpeech:
         except Exception:
             pass
 
-    def _synthesize(self, text: str) -> Optional[io.BytesIO]:
+    def _synthesize(self, text: str) -> io.BytesIO | None:
         try:
             response = self._openai.audio.speech.create(
                 model=TTS_MODEL,

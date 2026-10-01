@@ -1,13 +1,10 @@
 """Regression: OAuth scopes must match actually granted permissions."""
 from __future__ import annotations
 
-import json
-
 from auth.account_manager import AccountManager
 from auth.google_oauth import GoogleIdentity
 from auth.scopes import CALENDAR_SCOPES, GMAIL_READONLY_SCOPES, GMAIL_SCOPES, IDENTITY_SCOPES
 from auth.token_store import InMemoryTokenStore
-from google.oauth2.credentials import Credentials
 from tests.helpers_google import CALENDAR_ONLY_SCOPES, FakeOAuth, _fake_creds, build_test_router
 
 

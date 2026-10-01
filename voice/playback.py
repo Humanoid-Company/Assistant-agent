@@ -5,7 +5,7 @@ import logging
 import queue
 import threading
 import time
-from typing import Optional
+from collections import deque
 
 import numpy as np
 import sounddevice as sd
@@ -27,9 +27,9 @@ class PlaybackTracker:
     def __init__(self, *, sample_rate: int = 24_000, channels: int = 1) -> None:
         self._sample_rate = sample_rate
         self._channels = channels
-        self._queue: "queue.Queue[Optional[_QueueItem]]" = queue.Queue()
-        self._stream: Optional[sd.RawOutputStream] = None
-        self._thread: Optional[threading.Thread] = None
+        self._queue: queue.Queue[_QueueItem | None] = queue.Queue()
+        self._stream: sd.RawOutputStream | None = None
+        self._thread: threading.Thread | None = None
         self._bytes_queued = 0
         self._bytes_played = 0
         self._lock = threading.Lock()
@@ -42,6 +42,8 @@ class PlaybackTracker:
         self._write_frame_bytes = max(2, int(sample_rate * 0.02) * 2 * channels)
         self._last_interrupt_at = 0.0
         self._volume = 1.0
+        # (monotonic time, rms) of frames handed to the speakers — the echo reference.
+        self._out_levels: deque[tuple[float, float]] = deque()
 
     def start(self) -> None:
         if self._stream is not None:
@@ -133,6 +135,22 @@ class PlaybackTracker:
         with self._lock:
             return self._generation
 
+    def recent_output_rms(self, window_s: float = 0.5) -> float:
+        """Loudest frame played in the last `window_s` (covers output buffering + the
+        speaker→mic delay). 0 when nothing has played recently."""
+        cutoff = time.monotonic() - window_s
+        with self._lock:
+            return max((rms for at, rms in self._out_levels if at >= cutoff), default=0.0)
+
+    def _note_output_level(self, frame: bytes) -> None:
+        arr = np.frombuffer(frame, dtype=np.int16).astype(np.float32)
+        rms = float(np.sqrt(np.mean(arr * arr))) if arr.size else 0.0
+        now = time.monotonic()
+        with self._lock:
+            self._out_levels.append((now, rms))
+            while self._out_levels and self._out_levels[0][0] < now - 1.0:
+                self._out_levels.popleft()
+
     @property
     def queued_bytes(self) -> int:
         with self._lock:
@@ -188,9 +206,9 @@ class PlaybackTracker:
                         if vol < 0.999:
                             arr = np.frombuffer(frame, dtype=np.int16).astype(np.float32)
                             arr = (arr * vol).clip(-32768, 32767).astype(np.int16)
-                            self._stream.write(arr.tobytes())
-                        else:
-                            self._stream.write(frame)
+                            frame = arr.tobytes()
+                        self._note_output_level(frame)
+                        self._stream.write(frame)
                     offset += len(frame)
                     with self._lock:
                         self._bytes_played += len(frame)

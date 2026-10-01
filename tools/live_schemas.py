@@ -1,23 +1,7 @@
 """OpenAI Responses function schemas for the GPT-Live backend."""
 from __future__ import annotations
 
-from robot_control import ROBOT_ACTIONS
-
-# Keep in sync with assistant.VOICE_OPTIONS / LANGUAGE_OPTIONS without importing assistant
-# (avoids audio/business import cycles in unit tests).
-VOICE_OPTIONS: tuple[str, ...] = (
-    "alloy",
-    "ash",
-    "ballad",
-    "coral",
-    "echo",
-    "sage",
-    "shimmer",
-    "verse",
-    "marin",
-    "cedar",
-)
-LANGUAGE_OPTIONS: tuple[str, ...] = ("uk", "ru", "en")
+from voice.options import LANGUAGE_OPTIONS, VOICE_OPTIONS
 
 _CALENDAR_PROPS = {
     "title": {"type": "string"},
@@ -283,8 +267,11 @@ LIVE_BACKEND_TOOLS: list[dict] = [
     ),
     _fn(
         "google_account",
-        "Browser OAuth Google account: connect, status, disconnect, grant_gmail, grant_notes, "
-        "reauth_switch, lock_session. Voice/email is NOT identity proof.",
+        "Browser OAuth Google account. connect / reauth_switch (new or different user) and "
+        "grant_all (add every missing permission) open ONE consent page for calendar, Gmail and "
+        "Drive notes and return immediately with consent_pending — the result is announced "
+        "later. Also: status, disconnect, lock_session. grant_gmail/grant_notes = grant_all. "
+        "Voice/email is NOT identity proof.",
         {
             "action": {
                 "type": "string",
@@ -292,6 +279,7 @@ LIVE_BACKEND_TOOLS: list[dict] = [
                     "connect",
                     "status",
                     "disconnect",
+                    "grant_all",
                     "grant_gmail",
                     "grant_notes",
                     "reauth_switch",
@@ -350,11 +338,5 @@ LIVE_BACKEND_TOOLS: list[dict] = [
         "check_connection",
         "Check Google auth/API connectivity. Only on explicit user request.",
         {},
-    ),
-    _fn(
-        "control_robot",
-        "Physical robot action when the user explicitly requests motion/pose.",
-        {"action": {"type": "string", "enum": list(ROBOT_ACTIONS)}},
-        required=["action"],
     ),
 ]

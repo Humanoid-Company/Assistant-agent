@@ -5,8 +5,6 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from agents.types import AgentResult
 from tools.calendar_tools import CalendarToolWrappers
 from tools.executor import ToolExecutionContext, ToolExecutor
@@ -21,7 +19,7 @@ def test_normalize_voice_engine_defaults_and_aliases():
     assert normalize_voice_engine("realtime") == "realtime"
     assert normalize_voice_engine("LIVE") == "live"
     assert normalize_voice_engine("gpt-live") == "live"
-    assert normalize_voice_engine("weird") == "realtime"
+    assert normalize_voice_engine("weird") == "live"
     assert normalize_voice_engine(None) in ("live", "realtime")
 
 

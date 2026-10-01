@@ -13,7 +13,7 @@ from tools.calendar_tools import CalendarToolWrappers
 from tools.executor import ToolExecutor
 from tools.gmail_tools import GmailToolWrappers
 from tools.task_context import TaskRevisionTracker
-from voice.barge_in_gate import BargeInAction, BargeInGate, BargeInState
+from voice.barge_in_gate import BargeInAction, BargeInGate
 from voice.busy_cues import BusyCueController
 from voice.live_session import LiveVoiceSession
 from voice.local_vad import LocalSpeechDetector, VadTick, downsample_24k_to_16k, pcm_rms
@@ -163,8 +163,8 @@ def test_actual_sustained_speech_confirms():
     gate._candidate_started = time.monotonic() - 0.12
     # Feed several modulated speech ticks
     for _ in range(5):
-        gate.vad.feed = lambda pcm, update_ambient=True: _speech_like_tick(  # type: ignore
-            onset=False, frames_ms=40, rms=2500 + (_ % 3) * 400
+        gate.vad.feed = lambda pcm, update_ambient=True, i=_: _speech_like_tick(  # type: ignore
+            onset=False, frames_ms=40, rms=2500 + (i % 3) * 400
         )
         d = gate.feed_mic(b"x", assistant_or_cue_playing=True)
         if d.action == BargeInAction.CONFIRM:
@@ -258,7 +258,7 @@ def test_transcript_keyword_interrupts_and_requests_short_ack():
     session.player.enqueue(b"\x00\x01" * 400)
     steered = {}
 
-    async def fake_steer(*, short_ack=False):
+    async def fake_steer(*, short_ack=False, **_):
         steered["short_ack"] = short_ack
 
     session._steer_stop_speaking = fake_steer  # type: ignore
@@ -298,8 +298,10 @@ def test_false_candidate_restores_volume():
     )
     session._maybe_local_barge_in(_tone_pcm24(30))
     assert session.player.volume < 1.0
+    # Silence long enough to end the candidate (VOICE_BARGE_IN_REJECT_SILENCE_MS, 300 ms) —
+    # shorter gaps are treated as pauses between words.
     session._barge_gate.vad.feed = lambda pcm, update_ambient=True: VadTick(  # type: ignore
-        onset=False, speaking=False, speech_frame=False, rms=40, ambient_rms=200, frames_ms=120
+        onset=False, speaking=False, speech_frame=False, rms=40, ambient_rms=200, frames_ms=320
     )
     session._maybe_local_barge_in(_tone_pcm24(30))
     assert session.player.volume == 1.0
@@ -339,3 +341,115 @@ def test_local_speech_detector_reset():
     det._speaking = True
     det.reset()
     assert not det.speaking
+
+
+def _stream_delta(session: LiveVoiceSession) -> None:
+    pcm = base64.b64encode(b"\x00\x01" * 30).decode("ascii")
+    asyncio.run(session._handle_event({"type": "session.output_audio.delta", "delta": pcm}))
+
+
+def test_continuous_stream_after_barge_in_is_not_muted_forever():
+    """Real log: the model flowed straight from the old answer into the reply to the
+    interruption without any pause, so a gap-only release muted it for 23 s."""
+    session = _session()
+    session._last_barge_in_at = 0.0
+    session._trigger_barge_in(source="vad_confirmed")
+    _stream_delta(session)  # old answer keeps streaming right away → dropped
+    assert session.player.queued_bytes == 0
+
+    session._barge_in_mono -= 2.0  # 2 s later, deltas still arriving back-to-back
+    session._last_output_delta_at = time.monotonic()
+    _stream_delta(session)
+    assert session.player.queued_bytes > 0  # the assistant is audible again
+    assert session._stale_dropped_chunks == 0
+
+
+def test_no_release_while_the_user_is_still_talking():
+    session = _session()
+    session._last_barge_in_at = 0.0
+    session._trigger_barge_in(source="vad_confirmed")
+    session._barge_in_mono -= 2.0
+    session._last_output_delta_at = time.monotonic()
+    session._vad._speaking = True  # user still mid-sentence
+    _stream_delta(session)
+    assert session.player.queued_bytes == 0
+
+
+_PLAYBACK_RMS = 3000.0  # assistant voice as sent to the speakers
+_MIC_ECHO_RMS = 250.0  # how loud the mic hears it (real logs: 180–375)
+
+
+def _echo_gate(*, learn_ticks: int = 40) -> BargeInGate:
+    BargeInGate._learned_coupling = 0.15  # fresh process
+    gate = _gate(use_energy_gate=True, energy_margin_playing=3.0)
+    gate.vad._ambient_rms = 12.0
+    gate.vad.feed = lambda pcm, update_ambient=True: VadTick(  # type: ignore
+        onset=False, speaking=True, speech_frame=True, rms=_MIC_ECHO_RMS, ambient_rms=12,
+        frames_ms=30, frame_rms_list=(_MIC_ECHO_RMS,), frame_zcr_list=(0.1,),
+    )
+    for _ in range(learn_ticks):
+        gate.feed_mic(b"x", assistant_or_cue_playing=True, output_rms=_PLAYBACK_RMS)
+    return gate
+
+
+def _onset(gate: BargeInGate, rms: float, *, output_rms: float = _PLAYBACK_RMS):
+    gate.vad.feed = lambda pcm, update_ambient=True: VadTick(  # type: ignore
+        onset=True, speaking=True, speech_frame=True, rms=rms, ambient_rms=12, frames_ms=30,
+        frame_rms_list=(rms,), frame_zcr_list=(0.1,),
+    )
+    return gate.feed_mic(b"x", assistant_or_cue_playing=True, output_rms=output_rms)
+
+
+def test_own_voice_from_speakers_is_not_an_interruption():
+    """Real log: candidates at rms 182–375 while the assistant spoke (ambient 12) confirmed as
+    'sustained_speech' and cut the assistant off mid-answer."""
+    gate = _echo_gate()
+    decision = _onset(gate, 375)
+    assert decision.action == BargeInAction.NONE
+    assert decision.reason == "echo_level"
+
+
+def test_echo_at_the_start_of_a_reply_after_a_pause_is_not_an_interruption():
+    """Real log: after a pause the learned echo level had decayed to ~4, so the first
+    syllables of the next reply (rms 375) cut it off. The bar now follows the playback level,
+    which is known before the sound even reaches the mic."""
+    gate = _echo_gate()
+    gate.vad.feed = lambda pcm, update_ambient=True: VadTick(  # type: ignore
+        onset=False, speaking=False, speech_frame=False, rms=10, ambient_rms=12, frames_ms=30,
+        frame_rms_list=(10.0,), frame_zcr_list=(0.0,),
+    )
+    for _ in range(50):  # long pause, nothing playing
+        gate.feed_mic(b"x", assistant_or_cue_playing=False, output_rms=0.0)
+    assert _onset(gate, 375).reason == "echo_level"
+
+
+def test_first_reply_of_a_session_is_protected_before_any_learning():
+    gate = _echo_gate(learn_ticks=0)
+    assert _onset(gate, 375).reason == "echo_level"
+
+
+def test_user_voice_over_the_echo_still_interrupts():
+    gate = _echo_gate()
+    assert _onset(gate, 1945).action == BargeInAction.DUCK
+
+
+def test_audio_only_barge_in_lets_the_model_resume_if_nobody_spoke():
+    session = _session()
+    sent = {}
+
+    class _Instructions:
+        async def append(self, *, content, **_):
+            sent["content"] = content
+
+    session._connection = type("C", (), {"session": type("S", (), {"instructions": _Instructions()})()})()
+    asyncio.run(session._steer_stop_speaking(uncertain=True))
+    assert "continue your previous answer" in sent["content"]
+
+
+def test_player_reports_recent_output_level():
+    tracker = PlaybackTracker(sample_rate=24000)
+    assert tracker.recent_output_rms() == 0.0
+    tracker._note_output_level(_tone_pcm24(20, amp=3000))
+    assert 1500 < tracker.recent_output_rms() < 3000
+    tracker._out_levels[0] = (time.monotonic() - 5, tracker._out_levels[0][1])
+    assert tracker.recent_output_rms() == 0.0  # old audio no longer counts

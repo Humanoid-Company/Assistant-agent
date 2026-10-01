@@ -29,7 +29,7 @@ import logging
 import queue
 import threading
 import time
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import numpy as np
 import sounddevice as sd
@@ -91,9 +91,9 @@ class RealtimePlayer:
     """Plays raw PCM16 @ 24kHz audio deltas from the Realtime API."""
 
     def __init__(self) -> None:
-        self._queue: "queue.Queue[Optional[bytes]]" = queue.Queue()
-        self._stream: Optional[sd.RawOutputStream] = None
-        self._thread: Optional[threading.Thread] = None
+        self._queue: queue.Queue[bytes | None] = queue.Queue()
+        self._stream: sd.RawOutputStream | None = None
+        self._thread: threading.Thread | None = None
         self._ms_played = 0.0
         self._lock = threading.Lock()
 
@@ -163,9 +163,9 @@ class RealtimeConversation:
     def __init__(
         self,
         tools: list[dict],
-        on_tool_call: Callable[[str, dict, str], Optional[str]],
-        silent_tools: Optional[set[str]] = None,
-        no_followup_tools: Optional[set[str]] = None,
+        on_tool_call: Callable[[str, dict, str], str | None],
+        silent_tools: set[str] | None = None,
+        no_followup_tools: set[str] | None = None,
         voice: str = REALTIME_VOICE,
     ) -> None:
         self._client = OpenAI(api_key=OPENAI_API_KEY)
@@ -189,10 +189,10 @@ class RealtimeConversation:
         self._cm = None
         self._conn = None
         self._send_lock = threading.Lock()
-        self._events: "queue.Queue" = queue.Queue()
+        self._events: queue.Queue = queue.Queue()
         self._closed = threading.Event()
-        self._reader_thread: Optional[threading.Thread] = None
-        self._feeder_thread: Optional[threading.Thread] = None
+        self._reader_thread: threading.Thread | None = None
+        self._feeder_thread: threading.Thread | None = None
 
         self.player = RealtimePlayer()
 
@@ -210,11 +210,6 @@ class RealtimeConversation:
         # can't loop forever even if the model calls another silent-only tool.
         self._next_response_is_forced_followup = False
         self._current_response_is_forced_followup = False
-        # Set (possibly to "") whenever a user-utterance transcription
-        # completes — consumed by pump_for_transcript() for deterministic
-        # trigger-phrase matching (assistant.py) without a second, separate
-        # STT pass that could disagree with what this session itself heard.
-        self._last_transcript: Optional[str] = None
         self._silent_tool_used_this_response = False
         # Counts rather than a single flag: a tool call's function_call_output
         # triggers a follow-up create_response() *before* the tool-call
@@ -234,12 +229,12 @@ class RealtimeConversation:
         # that produced a fabricated "не вдалося знайти" reply once (see config.py's guardrail
         # against inventing a task result, added alongside this fix) instead of the real,
         # already-computed dispatch_task answer.
-        self._deferred_response_requests: list[Optional[str]] = []
+        self._deferred_response_requests: list[str | None] = []
 
         # Latency instrumentation.
-        self._speech_stopped_at: Optional[float] = None
-        self._response_requested_at: Optional[float] = None
-        self._first_audio_at: Optional[float] = None
+        self._speech_stopped_at: float | None = None
+        self._response_requested_at: float | None = None
+        self._first_audio_at: float | None = None
 
     # ── Connection ────────────────────────────────────────────────────────────
 
@@ -360,14 +355,14 @@ class RealtimeConversation:
             if not self._closed.is_set():
                 logger.warning("Realtime connection lost: %s", exc)
 
-    def pump(self, timeout: float = 0.05) -> Optional[bytes]:
+    def pump(self, timeout: float = 0.05) -> bytes | None:
         """
         Process queued events for up to *timeout* seconds.
 
         Returns the raw 16 kHz PCM of a user utterance if one just finished
         (speech_started -> speech_stopped) during this call, else None.
         """
-        completed_pcm: Optional[bytes] = None
+        completed_pcm: bytes | None = None
         deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
@@ -382,26 +377,6 @@ class RealtimeConversation:
                 completed_pcm = pcm
         return completed_pcm
 
-    def pump_for_transcript(self, timeout: float = 1.5) -> Optional[str]:
-        """Blocks until the input transcription for the utterance that just
-        finished (speech_stopped) arrives, or *timeout* elapses.
-
-        Used for deterministic robot-trigger matching: checking against this
-        session's own transcription (instead of a second, separate STT pass)
-        avoids the two engines disagreeing on what was said. Checks the
-        already-arrived value first — the completion event may land inside
-        the very same pump() call that returned the speech_stopped PCM.
-        """
-        deadline = time.monotonic() + timeout
-        while True:
-            if self._last_transcript is not None:
-                text, self._last_transcript = self._last_transcript, None
-                return text
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return None
-            self.pump(timeout=min(0.1, remaining))
-
     def wait_until_response_done(self, timeout: float = 8.0) -> None:
         """Block until the current in-flight response finishes (used before
         closing the session, so a farewell line isn't cut off)."""
@@ -411,7 +386,7 @@ class RealtimeConversation:
                 return
             self.pump(timeout=0.1)
 
-    def _handle_event(self, event) -> Optional[bytes]:
+    def _handle_event(self, event) -> bytes | None:
         etype = getattr(event, "type", "")
 
         if etype == "input_audio_buffer.speech_started":
@@ -434,7 +409,6 @@ class RealtimeConversation:
             if text:
                 logger.info("[user] %s", text)
                 self._turns.append({"role": "user", "content": text})
-            self._last_transcript = text
             return None
 
         if etype == "response.created":
@@ -555,7 +529,7 @@ class RealtimeConversation:
         model call end_conversation during the "Слухаю!" greeting instead of
         just saying it, instantly ending the brand new session).
 
-        Blocks briefly if a response is still in flight (e.g. a robot-trigger
+        Blocks briefly if a response is still in flight (e.g. a scripted
         confirmation firing right as a forced silent-tool follow-up from the
         previous turn is still wrapping up) — the server rejects an
         overlapping response.create outright, and `say()`'s call sites are
@@ -576,7 +550,7 @@ class RealtimeConversation:
             },
         })
 
-    def create_response(self, tool_choice: Optional[str] = None) -> None:
+    def create_response(self, tool_choice: str | None = None) -> None:
         """Ask the model for a normal conversational reply.
 
         No-ops (deferring instead — see the response.done handler) if a

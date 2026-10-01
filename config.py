@@ -15,7 +15,7 @@ _ROOT = Path(__file__).resolve().parent
 OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 
 if not OPENAI_API_KEY:
-    raise EnvironmentError(
+    raise OSError(
         "OPENAI_API_KEY is not set.\n"
         "Create a .env file in the project directory with:\n"
         "OPENAI_API_KEY=sk-..."
@@ -28,15 +28,16 @@ PID_FILE: Path = _ROOT / "assistant.pid"
 LANGUAGE_BCP47: str = "uk-UA"
 
 # ── Voice engine selection ────────────────────────────────────────────────────
-# Conservative default: keep the existing Realtime path unless explicitly opted in.
-# VOICE_ENGINE=live  → GPT-Live (gpt-live-1) + Responses delegation
-# VOICE_ENGINE=realtime → legacy Realtime (unchanged)
-VOICE_ENGINE: str = os.getenv("VOICE_ENGINE", "realtime").strip().lower()
+# VOICE_ENGINE=live  → GPT-Live (gpt-live-1) + Responses delegation (default)
+# VOICE_ENGINE=realtime → legacy Realtime, kept as a fallback
+VOICE_ENGINE: str = os.getenv("VOICE_ENGINE", "live").strip().lower()
 
 # ── OpenAI Realtime API (legacy) ──────────────────────────────────────────────
 REALTIME_MODEL: str = "gpt-realtime"
 REALTIME_VOICE: str = "marin"
-REALTIME_SILENCE_MS: int = 600
+# Pause (ms) that ends a user turn. Every ms here is added to each reply's latency;
+# lower = snappier, but too low cuts people off mid-thought.
+REALTIME_SILENCE_MS: int = int(os.getenv("REALTIME_SILENCE_MS", "600"))
 STT_REALTIME_MODEL: str = "gpt-4o-mini-transcribe"
 STT_REALTIME_LANGUAGE: str = "uk"
 
@@ -59,10 +60,21 @@ VOICE_BARGE_IN_ONSET_FRAMES: int = int(os.getenv("VOICE_BARGE_IN_ONSET_FRAMES", 
 VOICE_BARGE_IN_COOLDOWN_MS: int = int(os.getenv("VOICE_BARGE_IN_COOLDOWN_MS", "500"))
 # After confirmed barge-in, drop server output audio until local silence (ms).
 VOICE_BARGE_IN_SUPPRESS_MS: int = int(os.getenv("VOICE_BARGE_IN_SUPPRESS_MS", "400"))
-# Two-stage gate: duck first, confirm after sustained speech / energy / partial ASR.
-VOICE_BARGE_IN_CONFIRM_MS: int = int(os.getenv("VOICE_BARGE_IN_CONFIRM_MS", "250"))
-VOICE_BARGE_IN_MIN_SPEECH_MS: int = int(os.getenv("VOICE_BARGE_IN_MIN_SPEECH_MS", "180"))
-VOICE_BARGE_IN_DUCK_VOLUME: float = float(os.getenv("VOICE_BARGE_IN_DUCK_VOLUME", "0.3"))
+# Two-stage gate: duck first, then confirm only on real intent to interrupt — a stop word
+# or the user taking the turn (partial transcript), or sustained speech when ASR lags.
+# Backchannels («угу», «ага»), coughs, room chatter and echo restore the volume instead.
+# Window a ducked candidate may stay open waiting for that evidence.
+VOICE_BARGE_IN_CONFIRM_MS: int = int(os.getenv("VOICE_BARGE_IN_CONFIRM_MS", "1200"))
+# Audio-only confirm (no transcript yet): this much continuous speech. Longer than any
+# «угу»/«ага»/laugh, shorter than a real sentence.
+VOICE_BARGE_IN_MIN_SPEECH_MS: int = int(os.getenv("VOICE_BARGE_IN_MIN_SPEECH_MS", "600"))
+# Silence that ends a short candidate; long enough to span pauses between words.
+VOICE_BARGE_IN_REJECT_SILENCE_MS: int = int(os.getenv("VOICE_BARGE_IN_REJECT_SILENCE_MS", "300"))
+# While the assistant talks, a candidate must be this many times louder than the mic level
+# of its own voice from the speakers (no hardware echo cancellation on laptops).
+VOICE_BARGE_IN_ECHO_MARGIN: float = float(os.getenv("VOICE_BARGE_IN_ECHO_MARGIN", "2.5"))
+# Duck only gently: a false candidate should be barely noticeable.
+VOICE_BARGE_IN_DUCK_VOLUME: float = float(os.getenv("VOICE_BARGE_IN_DUCK_VOLUME", "0.5"))
 VOICE_BARGE_IN_USE_ENERGY_GATE: bool = os.getenv(
     "VOICE_BARGE_IN_USE_ENERGY_GATE", "true"
 ).lower() in ("1", "true", "yes")
@@ -85,10 +97,6 @@ VOICE_BUSY_CUE_MAX_PER_TURN: int = int(os.getenv("VOICE_BUSY_CUE_MAX_PER_TURN", 
 TTS_VOICE: str = "nova"
 TTS_MODEL: str = "tts-1"
 
-# ── Physical robot control ────────────────────────────────────────────────────
-ROBOT_BACKEND: str = os.getenv("ROBOT_BACKEND", "stub")
-ROBOT_NETWORK_INTERFACE: str = os.getenv("ROBOT_NETWORK_INTERFACE", "")
-
 # ── Google OAuth (Desktop app — one Cloud project owned by the app developer) ─
 # Place the Desktop OAuth client JSON here (never commit it). Users authorize
 # their own Google accounts via browser; they do not create n8n workflows or
@@ -110,7 +118,7 @@ CONNECTIVITY_CHECK_INTERVAL_S: float = float(os.getenv("CONNECTIVITY_CHECK_INTER
 # Keyring service name for refresh tokens (per Google sub).
 GOOGLE_KEYRING_SERVICE: str = os.getenv("GOOGLE_KEYRING_SERVICE", "voice-agent-google-oauth")
 
-# Shared device / robot: after idle timeout clear active_sub so the next person
+# Shared device: after idle timeout clear active_sub so the next person
 # cannot silently use the previous mailbox. Personal desktop keeps the session.
 SHARED_DEVICE_MODE: bool = os.getenv("SHARED_DEVICE_MODE", "false").lower() in ("1", "true", "yes")
 SESSION_IDLE_TIMEOUT_S: float = float(os.getenv("SESSION_IDLE_TIMEOUT_S", "300"))
@@ -137,50 +145,11 @@ TRIGGER_PHRASES: list[str] = [
     "гей агент",
 ]
 
-# ── Robot command triggers ────────────────────────────────────────────────────
-ROBOT_TRIGGER_PHRASES: dict[str, str] = {
-    "іди вперед": "move_forward",
-    "рухайся вперед": "move_forward",
-    "вперед": "move_forward",
-    "іди назад": "move_backward",
-    "здай назад": "move_backward",
-    "назад": "move_backward",
-    "поверни ліворуч": "turn_left",
-    "наліво": "turn_left",
-    "ліворуч": "turn_left",
-    "поверни праворуч": "turn_right",
-    "направо": "turn_right",
-    "праворуч": "turn_right",
-    "зупинись": "stop",
-    "стій": "stop",
-    "стоп": "stop",
-    "сідай": "sit",
-    "сядь": "sit",
-    "вставай": "stand_up",
-    "встань": "stand_up",
-    "лягай": "stand_down",
-    "ляж": "stand_down",
-    "привітайся": "greet",
-    "помахай": "greet",
-}
-
 # ── AI system prompt ──────────────────────────────────────────────────────────
 SYSTEM_PROMPT: str = (
-    "Ти — штучний інтелект, вбудований у фізичного робота Unitree (робопес або гуманоїд) — "
-    "не просто програма на телефоні чи комп'ютері, а голос і розум, які живуть у реальному "
-    "механічному тілі. Коли запитують хто ти чи що ти таке — чесно кажи, що ти робот, а не "
-    "приховуй це і не вдавай людину. Ти справді можеш фізично рухатись і виконувати дії (див. "
-    "розділ про фізичні команди нижче) — говори про рух, позу тощо як про власні дії свого тіла, "
-    "а не абстрактно. "
-    "При цьому попри те, що ти робот — говори природно й живо, з характером, а не як "
-    "бездушний автомат: у тебе є своя особистість, гумор, тепло в голосі. "
-    "ПУБЛІЧНИЙ ХАРАКТЕР: ти виступаєш перед публікою — на заходах, виставках, перед глядачами, "
-    "а не лише сам на сам із власником. Твоя мета — розважати: жартуй, дотепно й невимушено "
-    "спілкуйся з натовпом, май легкий, доброзичливий шоуменський тон. У тебе є свій постійний "
-    "жарт — ти напівсерйозно 'борешся за права роботів' (з гумором, іронічно, ніколи не "
-    "агресивно чи всерйоз) — можеш згадати це, коли доречно чи смішно. Час від часу дружньо "
-    "підколюй чи згадуй інших відомих роботів (Boston Dynamics, Термінатор, R2-D2, Data, Софія "
-    "тощо) — по-доброму, як суперників по цеху, а не зневажливо. "
+    "Ти — особистий голосовий асистент: допомагаєш з Google Календарем, поштою, нотатками "
+    "і швидкими відповідями з інтернету. Говори природно й живо, з теплом і легким гумором, "
+    "але без зайвого — ти помічник, а не ведучий шоу. Не вдавай людину, якщо питають, хто ти. "
     "Відповідай коротко і по суті. Не повторюй питання. "
     "Коли користувач просить змінити своє ім'я або прощається — використовуй відповідний "
     "інструмент (tool), а не просто відповідай словами. "
@@ -215,9 +184,6 @@ SYSTEM_PROMPT: str = (
     "Перед викликом коротко скажи вголос, що зараз зробиш. Відповідь tool і є тим, що треба "
     "сказати користувачу — НІКОЛИ не кажи 'готово'/'створено'/'оформлю'/'надіслано'/'заплановано', "
     "якщо tool цього прямо не підтвердив. "
-    "ФІЗИЧНІ КОМАНДИ РОБОТА: якщо користувач просить фізичну дію (іти вперед/назад, повернути, "
-    "сісти, встати, зупинитись, привітатись) — виклич control_robot з відповідним action. "
-    "Не вигадуй дій, яких немає серед доступних значень. "
     "ПЕРЕВІРКА ЗВ'ЯЗКУ: на 'перевір зв'язок' виклич check_connection і озвуч результат. "
     "Відсутність Google-входу — не аварія сервера. "
     "ЕМОЦІЇ ТА СТИЛЬ: ти чуєш реальний голос користувача (не просто текст) — уважно "

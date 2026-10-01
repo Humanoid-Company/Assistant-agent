@@ -10,13 +10,12 @@ import re
 import threading
 import uuid
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
-from googleapiclient.discovery import build
-
-from integrations.google_errors import GoogleApiError, map_google_error
+from integrations.google_errors import GoogleApiError
+from integrations.google_http import google_execute, google_service
 
 logger = logging.getLogger(__name__)
 
@@ -132,8 +131,15 @@ class GoogleNotesClient:
     """Thin Drive v3 + Docs v1 wrapper. Credentials must include drive.file."""
 
     def __init__(self, credentials) -> None:
-        self._drive = build("drive", "v3", credentials=credentials, cache_discovery=False)
-        self._docs = build("docs", "v1", credentials=credentials, cache_discovery=False)
+        self._credentials = credentials
+        self._drive = google_service("drive", "v3", credentials)
+        self._docs = google_service("docs", "v1", credentials)
+
+    def _read(self, request: Any) -> Any:
+        return google_execute(request, self._credentials, read_only=True)
+
+    def _write(self, request: Any) -> Any:
+        return google_execute(request, self._credentials, read_only=False)
 
     def find_notes_documents(self) -> list[dict[str, Any]]:
         query = (
@@ -141,21 +147,16 @@ class GoogleNotesClient:
             "and trashed=false "
             "and mimeType='application/vnd.google-apps.document'"
         )
-        try:
-            response = (
-                self._drive.files()
-                .list(
-                    q=query,
-                    spaces="drive",
-                    fields="files(id,name,createdTime,appProperties)",
-                    orderBy="createdTime",
-                    pageSize=10,
-                )
-                .execute()
+        response = self._read(
+            self._drive.files().list(
+                q=query,
+                spaces="drive",
+                fields="files(id,name,createdTime,appProperties)",
+                orderBy="createdTime",
+                pageSize=10,
             )
-            return list(response.get("files") or [])
-        except Exception as exc:
-            raise map_google_error(exc) from exc
+        )
+        return list(response.get("files") or [])
 
     def create_notes_document(self, *, title: str = NOTES_DOC_TITLE) -> dict[str, Any]:
         body = {
@@ -163,26 +164,15 @@ class GoogleNotesClient:
             "mimeType": "application/vnd.google-apps.document",
             "appProperties": {APP_PROP_KEY: APP_PROP_VALUE},
         }
-        try:
-            created = (
-                self._drive.files()
-                .create(body=body, fields="id,name,createdTime,appProperties")
-                .execute()
-            )
-            document_id = created["id"]
-            self.batch_update(
-                document_id,
-                [{"insertText": {"location": {"index": 1}, "text": f"# {NOTES_DOC_TITLE}\n\n"}}],
-            )
-            return created
-        except Exception as exc:
-            raise map_google_error(exc) from exc
+        created = self._write(self._drive.files().create(body=body, fields="id,name,createdTime,appProperties"))
+        self.batch_update(
+            created["id"],
+            [{"insertText": {"location": {"index": 1}, "text": f"# {NOTES_DOC_TITLE}\n\n"}}],
+        )
+        return created
 
     def get_document(self, document_id: str) -> dict[str, Any]:
-        try:
-            return self._docs.documents().get(documentId=document_id).execute()
-        except Exception as exc:
-            raise map_google_error(exc) from exc
+        return self._read(self._docs.documents().get(documentId=document_id))
 
     def get_document_text(self, document_id: str) -> str:
         return _extract_plain_text(self.get_document(document_id))
@@ -200,13 +190,12 @@ class GoogleNotesClient:
         if required_revision_id:
             body["writeControl"] = {"requiredRevisionId": required_revision_id}
         try:
-            return self._docs.documents().batchUpdate(documentId=document_id, body=body).execute()
-        except Exception as exc:
-            mapped = map_google_error(exc)
-            detail = str(exc).lower()
+            return self._write(self._docs.documents().batchUpdate(documentId=document_id, body=body))
+        except GoogleApiError as mapped:
+            detail = str(mapped.__cause__ or "").lower()
             if mapped.code == "conflict" or "revision" in detail:
-                raise NotesConflictError() from exc
-            raise mapped from exc
+                raise NotesConflictError() from mapped.__cause__
+            raise
 
 
 def _body_end_index(doc: dict[str, Any]) -> int:
@@ -885,7 +874,7 @@ class FakeNotesClient:
         meta = {
             "id": doc_id,
             "name": title,
-            "createdTime": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "createdTime": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             "appProperties": {APP_PROP_KEY: APP_PROP_VALUE},
         }
         self.files[doc_id] = meta
