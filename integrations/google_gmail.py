@@ -6,11 +6,11 @@ import logging
 import re
 from email.message import EmailMessage
 from email.utils import parseaddr
+from types import SimpleNamespace
 from typing import Any, Protocol
 
-from googleapiclient.discovery import build
-
 from integrations.google_errors import GoogleApiError, map_google_error
+from integrations.google_http import google_execute, google_service
 
 logger = logging.getLogger(__name__)
 
@@ -76,104 +76,99 @@ class GmailClient(Protocol):
 
 class GoogleGmailClient:
     def __init__(self, credentials) -> None:
-        self._service = build("gmail", "v1", credentials=credentials, cache_discovery=False)
+        self._credentials = credentials
+        self._service = google_service("gmail", "v1", credentials)
+
+    def _read(self, request: Any) -> Any:
+        return google_execute(request, self._credentials, read_only=True)
+
+    def _write(self, request: Any) -> Any:
+        return google_execute(request, self._credentials, read_only=False)
+
+    def _summary_request(self, message_id: str) -> Any:
+        return self._service.users().messages().get(
+            userId="me",
+            id=message_id,
+            format="metadata",
+            metadataHeaders=list(_SUMMARY_HEADERS),
+        )
 
     def search(self, query: str, max_results: int = 10) -> list[dict]:
-        """List matching messages using metadata summaries only (no full body)."""
-        try:
-            response = (
-                self._service.users()
-                .messages()
-                .list(userId="me", q=query, maxResults=max_results)
-                .execute()
-            )
-            ids = [m["id"] for m in response.get("messages", [])]
-            return [self.get_message_summary(mid) for mid in ids]
-        except Exception as exc:
-            raise map_google_error(exc) from exc
+        """List matching messages using metadata summaries only (no full body).
+
+        The per-message metadata fetches go out as ONE batch HTTP round trip instead of
+        N sequential requests.
+        """
+        response = self._read(
+            self._service.users().messages().list(userId="me", q=query, maxResults=max_results)
+        )
+        ids = [m["id"] for m in response.get("messages", [])]
+        if not ids:
+            return []
+        if len(ids) == 1:
+            return [self.get_message_summary(ids[0])]
+        found: dict[str, dict] = {}
+        failures: list[BaseException] = []
+
+        def on_part(request_id: str, part: dict | None, exc: BaseException | None) -> None:
+            if exc is not None:
+                failures.append(exc)
+            elif part is not None:
+                found[request_id] = part
+
+        def run_round(http: Any = None) -> None:
+            # Rebuilt per attempt so a retried round trip starts from clean result maps.
+            found.clear()
+            failures.clear()
+            batch = self._service.new_batch_http_request(callback=on_part)
+            for mid in ids:
+                batch.add(self._summary_request(mid), request_id=mid)
+            batch.execute(http=http)
+
+        self._read(SimpleNamespace(execute=run_round))
+        if failures and not found:
+            raise map_google_error(failures[0])
+        if failures:
+            logger.warning("gmail.search.partial ok=%s failed=%s", len(found), len(failures))
+        return [self._normalize_summary(found[mid]) for mid in ids if mid in found]
 
     def get_message_summary(self, message_id: str) -> dict:
         """Fetch headers + snippet only — used by search."""
-        try:
-            msg = (
-                self._service.users()
-                .messages()
-                .get(
-                    userId="me",
-                    id=message_id,
-                    format="metadata",
-                    metadataHeaders=list(_SUMMARY_HEADERS),
-                )
-                .execute()
-            )
-            return self._normalize_summary(msg)
-        except Exception as exc:
-            raise map_google_error(exc) from exc
+        return self._normalize_summary(self._read(self._summary_request(message_id)))
 
     def get_message(self, message_id: str) -> dict:
-        try:
-            msg = (
-                self._service.users()
-                .messages()
-                .get(userId="me", id=message_id, format="full")
-                .execute()
-            )
-            return self._normalize_message(msg)
-        except Exception as exc:
-            raise map_google_error(exc) from exc
+        msg = self._read(self._service.users().messages().get(userId="me", id=message_id, format="full"))
+        return self._normalize_message(msg)
 
     def get_draft(self, draft_id: str) -> dict:
-        try:
-            draft = self._service.users().drafts().get(userId="me", id=draft_id, format="full").execute()
-            msg = self._normalize_message(draft.get("message") or {})
-            # Prefer raw body without the untrusted wrapper for fingerprinting/send preview.
-            payload = draft.get("message", {}).get("payload") or {}
-            raw_body = _extract_body(payload)
-            headers = {
-                h["name"].lower(): h["value"]
-                for h in (draft.get("message", {}).get("payload") or {}).get("headers", [])
-            }
-            return {
-                "draft_id": draft_id,
-                "to": headers.get("to") or msg.get("to") or "",
-                "subject": headers.get("subject") or msg.get("subject") or "",
-                "body": raw_body,
-            }
-        except Exception as exc:
-            raise map_google_error(exc) from exc
+        draft = self._read(self._service.users().drafts().get(userId="me", id=draft_id, format="full"))
+        msg = self._normalize_message(draft.get("message") or {})
+        # Prefer raw body without the untrusted wrapper for fingerprinting/send preview.
+        payload = draft.get("message", {}).get("payload") or {}
+        raw_body = _extract_body(payload)
+        headers = {h["name"].lower(): h["value"] for h in payload.get("headers", [])}
+        return {
+            "draft_id": draft_id,
+            "to": headers.get("to") or msg.get("to") or "",
+            "subject": headers.get("subject") or msg.get("subject") or "",
+            "body": raw_body,
+        }
 
     def create_draft(self, to: str, subject: str, body: str) -> dict:
-        try:
-            raw = self._encode_message(to=to, subject=subject, body=body)
-            draft = (
-                self._service.users()
-                .drafts()
-                .create(userId="me", body={"message": {"raw": raw}})
-                .execute()
-            )
-            return {"draft_id": draft["id"], "message_id": draft.get("message", {}).get("id")}
-        except Exception as exc:
-            raise map_google_error(exc) from exc
+        raw = self._encode_message(to=to, subject=subject, body=body)
+        draft = self._write(
+            self._service.users().drafts().create(userId="me", body={"message": {"raw": raw}})
+        )
+        return {"draft_id": draft["id"], "message_id": draft.get("message", {}).get("id")}
 
     def send_message(self, to: str, subject: str, body: str) -> dict:
-        try:
-            raw = self._encode_message(to=to, subject=subject, body=body)
-            sent = (
-                self._service.users()
-                .messages()
-                .send(userId="me", body={"raw": raw})
-                .execute()
-            )
-            return {"message_id": sent["id"], "thread_id": sent.get("threadId")}
-        except Exception as exc:
-            raise map_google_error(exc) from exc
+        raw = self._encode_message(to=to, subject=subject, body=body)
+        sent = self._write(self._service.users().messages().send(userId="me", body={"raw": raw}))
+        return {"message_id": sent["id"], "thread_id": sent.get("threadId")}
 
     def send_draft(self, draft_id: str) -> dict:
-        try:
-            sent = self._service.users().drafts().send(userId="me", body={"id": draft_id}).execute()
-            return {"message_id": sent.get("id"), "draft_id": draft_id, "thread_id": sent.get("threadId")}
-        except Exception as exc:
-            raise map_google_error(exc) from exc
+        sent = self._write(self._service.users().drafts().send(userId="me", body={"id": draft_id}))
+        return {"message_id": sent.get("id"), "draft_id": draft_id, "thread_id": sent.get("threadId")}
 
     def send_reply(
         self,
@@ -185,26 +180,20 @@ class GoogleGmailClient:
         in_reply_to: str | None,
         references: str | None,
     ) -> dict:
-        try:
-            raw = self._encode_message(
-                to=to,
-                subject=subject,
-                body=body,
-                in_reply_to=in_reply_to,
-                references=references,
-            )
-            sent = (
-                self._service.users()
-                .messages()
-                .send(userId="me", body={"raw": raw, "threadId": thread_id})
-                .execute()
-            )
-            return {
-                "message_id": sent["id"],
-                "thread_id": sent.get("threadId") or thread_id,
-            }
-        except Exception as exc:
-            raise map_google_error(exc) from exc
+        raw = self._encode_message(
+            to=to,
+            subject=subject,
+            body=body,
+            in_reply_to=in_reply_to,
+            references=references,
+        )
+        sent = self._write(
+            self._service.users().messages().send(userId="me", body={"raw": raw, "threadId": thread_id})
+        )
+        return {
+            "message_id": sent["id"],
+            "thread_id": sent.get("threadId") or thread_id,
+        }
 
     @staticmethod
     def _encode_message(

@@ -8,11 +8,17 @@ from typing import Any, Protocol
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from googleapiclient.discovery import build
-
-from integrations.google_errors import GoogleApiError, map_google_error
+from integrations.google_errors import GoogleApiError
+from integrations.google_http import google_execute, google_service
 
 logger = logging.getLogger(__name__)
+
+# Only what the agent reads — snapshots/conflict checks compare summary, description,
+# start, end and etag, so those must stay in the list projection.
+_LIST_FIELDS = (
+    "items(id,etag,status,summary,description,start,end,recurringEventId,recurrence,"
+    "hangoutLink,htmlLink)"
+)
 
 
 class CalendarClient(Protocol):
@@ -25,85 +31,74 @@ class CalendarClient(Protocol):
 
 class GoogleCalendarClient:
     def __init__(self, credentials, calendar_id: str = "primary") -> None:
-        self._service = build("calendar", "v3", credentials=credentials, cache_discovery=False)
+        self._credentials = credentials
+        self._service = google_service("calendar", "v3", credentials)
         self._calendar_id = calendar_id
 
+    def _read(self, request: Any) -> Any:
+        return google_execute(request, self._credentials, read_only=True)
+
+    def _write(self, request: Any) -> Any:
+        return google_execute(request, self._credentials, read_only=False)
+
     def list_events(self, time_min: datetime, time_max: datetime, query: str | None = None) -> list[dict]:
-        try:
-            kwargs: dict[str, Any] = {
-                "calendarId": self._calendar_id,
-                "timeMin": time_min.isoformat(),
-                "timeMax": time_max.isoformat(),
-                "singleEvents": True,
-                "orderBy": "startTime",
-                "maxResults": 50,
-            }
-            if query:
-                kwargs["q"] = query
-            response = self._service.events().list(**kwargs).execute()
-            return response.get("items", [])
-        except Exception as exc:
-            raise map_google_error(exc) from exc
+        kwargs: dict[str, Any] = {
+            "calendarId": self._calendar_id,
+            "timeMin": time_min.isoformat(),
+            "timeMax": time_max.isoformat(),
+            "singleEvents": True,
+            "orderBy": "startTime",
+            "maxResults": 50,
+            "fields": _LIST_FIELDS,
+        }
+        if query:
+            kwargs["q"] = query
+        response = self._read(self._service.events().list(**kwargs))
+        return response.get("items", [])
 
     def create_event(self, body: dict, *, conference: bool = False) -> dict:
-        try:
-            if conference:
-                body = {
-                    **body,
-                    "conferenceData": {
-                        "createRequest": {
-                            "requestId": str(uuid4()),
-                            "conferenceSolutionKey": {"type": "hangoutsMeet"},
-                        }
-                    },
-                }
-            return (
-                self._service.events()
-                .insert(
-                    calendarId=self._calendar_id,
-                    body=body,
-                    conferenceDataVersion=1 if conference else 0,
-                    sendUpdates="all",
-                )
-                .execute()
+        if conference:
+            body = {
+                **body,
+                "conferenceData": {
+                    "createRequest": {
+                        "requestId": str(uuid4()),
+                        "conferenceSolutionKey": {"type": "hangoutsMeet"},
+                    }
+                },
+            }
+        return self._write(
+            self._service.events().insert(
+                calendarId=self._calendar_id,
+                body=body,
+                conferenceDataVersion=1 if conference else 0,
+                sendUpdates="all",
             )
-        except Exception as exc:
-            raise map_google_error(exc) from exc
+        )
 
     def update_event(self, event_id: str, body: dict, calendar_id: str | None = None) -> dict:
-        try:
-            return (
-                self._service.events()
-                .patch(
-                    calendarId=calendar_id or self._calendar_id,
-                    eventId=event_id,
-                    body=body,
-                    sendUpdates="all",
-                )
-                .execute()
+        return self._write(
+            self._service.events().patch(
+                calendarId=calendar_id or self._calendar_id,
+                eventId=event_id,
+                body=body,
+                sendUpdates="all",
             )
-        except Exception as exc:
-            raise map_google_error(exc) from exc
+        )
 
     def delete_event(self, event_id: str, calendar_id: str | None = None) -> None:
-        try:
+        self._write(
             self._service.events().delete(
                 calendarId=calendar_id or self._calendar_id,
                 eventId=event_id,
                 sendUpdates="all",
-            ).execute()
-        except Exception as exc:
-            raise map_google_error(exc) from exc
+            )
+        )
 
     def get_event(self, event_id: str, calendar_id: str | None = None) -> dict:
-        try:
-            return (
-                self._service.events()
-                .get(calendarId=calendar_id or self._calendar_id, eventId=event_id)
-                .execute()
-            )
-        except Exception as exc:
-            raise map_google_error(exc) from exc
+        return self._read(
+            self._service.events().get(calendarId=calendar_id or self._calendar_id, eventId=event_id)
+        )
 
 
 class FakeCalendarClient:

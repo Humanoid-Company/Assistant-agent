@@ -36,7 +36,9 @@ VOICE_ENGINE: str = os.getenv("VOICE_ENGINE", "realtime").strip().lower()
 # ── OpenAI Realtime API (legacy) ──────────────────────────────────────────────
 REALTIME_MODEL: str = "gpt-realtime"
 REALTIME_VOICE: str = "marin"
-REALTIME_SILENCE_MS: int = 600
+# Pause (ms) that ends a user turn. Every ms here is added to each reply's latency;
+# lower = snappier, but too low cuts people off mid-thought.
+REALTIME_SILENCE_MS: int = int(os.getenv("REALTIME_SILENCE_MS", "600"))
 STT_REALTIME_MODEL: str = "gpt-4o-mini-transcribe"
 STT_REALTIME_LANGUAGE: str = "uk"
 

@@ -236,6 +236,14 @@ class RealtimeConversation:
         # already-computed dispatch_task answer.
         self._deferred_response_requests: list[Optional[str]] = []
 
+        # Speculative replies: the caller starts a reply at end-of-speech, before the
+        # transcript lands, and may then take the turn back (local robot command).
+        # Events of a cancelled response (audio, tool calls, transcript) are dropped.
+        self._current_response_id: Optional[str] = None
+        self._awaiting_response_created = False
+        self._cancelled_response_ids: set[str] = set()
+        self._cancel_on_created_until = 0.0
+
         # Latency instrumentation.
         self._speech_stopped_at: Optional[float] = None
         self._response_requested_at: Optional[float] = None
@@ -438,6 +446,16 @@ class RealtimeConversation:
             return None
 
         if etype == "response.created":
+            self._awaiting_response_created = False
+            response_id = getattr(getattr(event, "response", None), "id", None)
+            self._current_response_id = response_id
+            if (
+                response_id
+                and not self._next_response_scripted
+                and time.monotonic() < self._cancel_on_created_until
+            ):
+                self._cancel_on_created_until = 0.0
+                self._cancel_response(response_id)
             self._current_response_scripted = self._next_response_scripted
             self._next_response_scripted = False
             self._current_response_is_forced_followup = self._next_response_is_forced_followup
@@ -450,6 +468,8 @@ class RealtimeConversation:
             return None
 
         if etype == "response.output_audio.delta":
+            if self._is_cancelled(event):
+                return None
             delta_b64 = getattr(event, "delta", "")
             if delta_b64:
                 if self._first_audio_at is None:
@@ -477,6 +497,9 @@ class RealtimeConversation:
         if etype == "response.function_call_arguments.done":
             call_id = getattr(event, "call_id", "")
             name = getattr(event, "name", "")
+            if self._is_cancelled(event):
+                logger.info("Tool call %s dropped — its response was cancelled (turn handled locally).", name)
+                return None
             args = parse_tool_arguments(getattr(event, "arguments", None))
             if args:
                 logger.info("Tool call: %s fields=%s", name, ",".join(sorted(str(key) for key in args)))
@@ -495,6 +518,11 @@ class RealtimeConversation:
             return None
 
         if etype == "response.done":
+            done_id = getattr(getattr(event, "response", None), "id", None)
+            was_cancelled_by_us = bool(done_id) and done_id in self._cancelled_response_ids
+            if was_cancelled_by_us:
+                self._cancelled_response_ids.discard(done_id)
+                self._assistant_transcript = ""
             got_speech = not self._current_response_scripted and bool(self._assistant_transcript)
             if got_speech:
                 self._turns.append({"role": "assistant", "content": self._assistant_transcript})
@@ -606,11 +634,39 @@ class RealtimeConversation:
             self._deferred_response_requests.append(tool_choice)
             return
         self._next_response_scripted = False
+        self._awaiting_response_created = True
         self._request_response()
         payload: dict = {"type": "response.create"}
         if tool_choice is not None:
             payload["response"] = {"tool_choice": tool_choice}
         self._send(payload)
+
+    def cancel_reply(self) -> None:
+        """Take back the reply create_response() just started for this user turn.
+
+        Covers every stage it can be in: still queued behind another response, sent but
+        not yet created server-side, or already streaming.
+        """
+        if self._deferred_response_requests:
+            self._deferred_response_requests.pop()
+            return
+        if self._awaiting_response_created:
+            # Cancel it the moment response.created reveals its id (bounded so a lost
+            # event can never cancel some later, unrelated reply).
+            self._cancel_on_created_until = time.monotonic() + 3.0
+            return
+        if self._current_response_id and not self._current_response_scripted:
+            self._cancel_response(self._current_response_id)
+
+    def _cancel_response(self, response_id: str) -> None:
+        self._cancelled_response_ids.add(response_id)
+        self.player.stop()
+        self._send({"type": "response.cancel", "response_id": response_id})
+        logger.info("Response %s cancelled — turn handled locally.", response_id)
+
+    def _is_cancelled(self, event) -> bool:
+        response_id = getattr(event, "response_id", None)
+        return bool(response_id) and response_id in self._cancelled_response_ids
 
     def _request_response(self) -> None:
         self._responses_requested += 1

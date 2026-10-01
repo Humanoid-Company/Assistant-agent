@@ -666,6 +666,9 @@ class Assistant:
         # Realtime: process restart required. Live: session restart only.
         self._voice_change_pending = False
         self._voice_engine = normalize_voice_engine(VOICE_ENGINE)
+        # Set when the model itself called control_robot for the current user turn, so the
+        # local trigger fast-path does not run the same physical action a second time.
+        self._model_robot_action_this_turn = False
 
         # Conversation history for the current run only — carries over between
         # sleep/wake cycles (in-memory), but resets when the process restarts.
@@ -758,6 +761,9 @@ class Assistant:
             self.state = State.AWAKE
 
     def _run_awake_session(self) -> None:
+        # Token refresh + TLS to Google run while the voice session connects and greets,
+        # so the first calendar/mail request of this wake doesn't pay for them.
+        threading.Thread(target=self.router.warm_up, daemon=True, name="google-warm-up").start()
         if self._voice_engine == "live":
             self._run_awake_session_live()
         else:
@@ -798,11 +804,15 @@ class Assistant:
                 pcm = self.rt.pump(timeout=0.05)
                 if pcm:
                     self._pending_cutoff = len(self.rt.get_turns())
+                    # Speculative: the model starts on the reply now, in parallel with the
+                    # input transcription (~0.3–1.5 s) that the robot fast-path needs.
+                    # A matched robot command takes the turn back via cancel_reply().
+                    self._model_robot_action_this_turn = False
+                    self.rt.create_response()
                     action = self._check_robot_trigger()
-                    if action:
+                    if action and not self._model_robot_action_this_turn:
+                        self.rt.cancel_reply()
                         self._execute_robot_trigger(action)
-                    else:
-                        self.rt.create_response()
 
             logger.info("[latency] Awake session duration: %.1fs", time.monotonic() - t_start)
 
@@ -1113,6 +1123,7 @@ class Assistant:
                 logger.info("[emotion] %s", emotion)
                 return ""
             if name == "control_robot":
+                self._model_robot_action_this_turn = True
                 self._handle_robot_action(call_id, args.get("action", "").strip().lower())
                 return None
             if name == "google_account":

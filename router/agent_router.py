@@ -13,11 +13,18 @@ from agents.pending_store import PendingStore
 from agents.types import AgentResult
 from auth.account_manager import AccountManager
 from auth.google_oauth import OAuthError
+from integrations.google_http import warm_up as warm_up_connection
 
 logger = logging.getLogger(__name__)
 
 _YES = re.compile(r"^\s*(так|да|yes|підтверджую|confirm|згоден|згодна)\s*[.!?]?\s*$", re.I)
 _NO = re.compile(r"^\s*(ні|нет|no|скасуй|не треба|cancel|reject)\s*[.!?]?\s*$", re.I)
+
+# Cheap authorized GETs, one per API host the agents talk to (Drive shares www.googleapis.com).
+_WARM_UP_PROBES: tuple[tuple[dict[str, bool], str], ...] = (
+    ({"calendar": True}, "https://www.googleapis.com/calendar/v3/users/me/calendarList/primary?fields=id"),
+    ({"gmail_readonly": True}, "https://gmail.googleapis.com/gmail/v1/users/me/profile"),
+)
 
 
 class AgentRouter:
@@ -428,6 +435,19 @@ class AgentRouter:
                 logger.warning("Connection probe failed: %s", type(exc).__name__)
                 return AgentResult("error", "Немає мережі або Google API недоступний.", {"network": False})
         return AgentResult("success", status.message, _asdict_safe(status))
+
+    def warm_up(self) -> None:
+        """Best-effort, off the audio thread, right after wake: refresh the access token and
+        open pooled TLS connections so the first real tool call of the session skips both."""
+        for scopes, url in _WARM_UP_PROBES:
+            try:
+                _sub, credentials = self.accounts.credentials_for(**scopes)
+                warm_up_connection(credentials, url)
+            except OAuthError:
+                continue  # not connected / scope not granted — nothing to warm
+            except Exception as exc:
+                logger.info("google.warm_up skipped: %s", type(exc).__name__)
+                return
 
     def calendar_action(self, **kwargs: Any) -> AgentResult:
         problem = calendar_call_problem(kwargs)
