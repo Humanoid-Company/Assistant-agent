@@ -2,22 +2,7 @@
 from __future__ import annotations
 
 from robot_control import ROBOT_ACTIONS
-
-# Keep in sync with assistant.VOICE_OPTIONS / LANGUAGE_OPTIONS without importing assistant
-# (avoids audio/business import cycles in unit tests).
-VOICE_OPTIONS: tuple[str, ...] = (
-    "alloy",
-    "ash",
-    "ballad",
-    "coral",
-    "echo",
-    "sage",
-    "shimmer",
-    "verse",
-    "marin",
-    "cedar",
-)
-LANGUAGE_OPTIONS: tuple[str, ...] = ("uk", "ru", "en")
+from voice.options import LANGUAGE_OPTIONS, VOICE_OPTIONS
 
 _CALENDAR_PROPS = {
     "title": {"type": "string"},
