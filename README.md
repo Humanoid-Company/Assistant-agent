@@ -93,6 +93,8 @@ Refresh tokens зберігаються в **OS keyring** (не в спільн�
 | `VOICE_BARGE_IN_CONFIRM_MS` | вікно підтвердження після duck (default `250`) |
 | `VOICE_BARGE_IN_MIN_SPEECH_MS` | мін. тривалість мови для confirm (default `180`) |
 | `VOICE_BUSY_CUES_ENABLED` | короткі «Угу.» під час довгих tools (default `true`) |
+| `REALTIME_SILENCE_MS` | пауза, що завершує репліку в realtime (default `600`); менше = швидша відповідь, але може обрізати |
+| `GOOGLE_HTTP_TIMEOUT_S` | таймаут одного запиту до Google API (default `15`) |
 | `GOOGLE_OAUTH_CLIENT_SECRETS_FILE` | шлях до Desktop client JSON |
 | `GOOGLE_ACCOUNT_STATE_FILE` | активний `sub` + display profiles (без секретів) |
 | `GOOGLE_CALENDAR_TIMEZONE` | дефолт `Europe/Kyiv` |
@@ -111,11 +113,29 @@ Refresh tokens зберігаються в **OS keyring** (не в спільн�
 Після restart сесія також не відновлюється автоматично. Refresh tokens у keyring лишаються,
 але активна сесія — ні.
 
-### Тести (без реальних Google credentials)
+### Тести і перевірки коду (без реальних Google credentials)
 
 ```bash
 .\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scriptsuff.exe check .      # lint (також як pre-commit hook)
+.\.venv\Scripts\mypy.exe .            # типи (поки інформативно, не блокує)
 ```
+
+> `uv run` не працює, якщо шлях до проєкту містить кирилицю/пробіли (`Мій ПК`,
+> `Робочий стіл`) — тоді викликайте `.venv\Scripts\...` напряму або перенесіть
+> проєкт, напр. у `C:\devoice-agent` (заодно поза OneDrive).
+
+### Структура коду
+
+| Де | Що |
+|---|---|
+| `assistant.py` | життєвий цикл (сон ↔ сесія), пам'ять, спільні tool-хелпери |
+| `voice/realtime_driver.py`, `voice/live_driver.py` | сесія на кожному рушії + його tool-обробники |
+| `router/agent_router.py` | локальний роутер; вільний текст → таблиця інтентів |
+| `agents/calendar_agent.py` + `calendar_create/edit/execution.py` | агент календаря (міксини по флоу) |
+| `agents/calendar_speech/events/validation.py` | чисті хелпери: мовлення, події, валідація |
+| `integrations/google_http.py` | спільний транспорт Google: пул з'єднань, таймаут, повтори читань |
+| `tools/realtime_schemas.py`, `tools/live_schemas.py` | схеми tools для кожного рушія |
 
 ### Ручна перевірка календаря
 
