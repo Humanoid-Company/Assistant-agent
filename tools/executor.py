@@ -235,22 +235,23 @@ class ToolExecutor:
         if name.startswith("gmail_"):
             if self._gmail is None:
                 return ToolResult(ok=False, status="error", message="Gmail tools are not configured.")
+            gmail = self._gmail
 
             def _gmail_call() -> AgentResult:
                 if name == "gmail_search_messages":
-                    return self._gmail.search_messages(args, session_id=sid)
+                    return gmail.search_messages(args, session_id=sid)
                 if name == "gmail_read_message":
-                    return self._gmail.read_message(args, session_id=sid)
+                    return gmail.read_message(args, session_id=sid)
                 if name == "gmail_create_draft":
-                    return self._gmail.create_draft(args, session_id=sid)
+                    return gmail.create_draft(args, session_id=sid)
                 if name == "gmail_prepare_send":
-                    return self._gmail.prepare_send(args, session_id=sid)
+                    return gmail.prepare_send(args, session_id=sid)
                 if name == "gmail_prepare_reply":
-                    return self._gmail.prepare_reply(args, session_id=sid)
+                    return gmail.prepare_reply(args, session_id=sid)
                 if name == "gmail_confirm_send":
-                    return self._gmail.confirm_send(args, session_id=sid)
+                    return gmail.confirm_send(args, session_id=sid)
                 if name == "gmail_reject_send":
-                    return self._gmail.reject_send(args, session_id=sid)
+                    return gmail.reject_send(args, session_id=sid)
                 raise KeyError(name)
 
             logger.info("live.tool.offloaded_to_thread tool_name=%s", name)
@@ -262,22 +263,23 @@ class ToolExecutor:
         if name.startswith("notes_"):
             if self._notes is None:
                 return ToolResult(ok=False, status="error", message="Notes tools are not configured.")
+            notes = self._notes
 
             def _notes_call() -> AgentResult:
                 if name == "notes_add":
-                    return self._notes.add_note(args, session_id=sid)
+                    return notes.add_note(args, session_id=sid)
                 if name == "notes_read":
-                    return self._notes.read_notes(args, session_id=sid)
+                    return notes.read_notes(args, session_id=sid)
                 if name == "notes_search":
-                    return self._notes.search_notes(args, session_id=sid)
+                    return notes.search_notes(args, session_id=sid)
                 if name == "notes_count":
-                    return self._notes.count_notes(args, session_id=sid)
+                    return notes.count_notes(args, session_id=sid)
                 if name == "notes_update":
-                    return self._notes.update_note(args, session_id=sid)
+                    return notes.update_note(args, session_id=sid)
                 if name == "notes_append":
-                    return self._notes.append_note(args, session_id=sid)
+                    return notes.append_note(args, session_id=sid)
                 if name == "notes_delete":
-                    return self._notes.delete_note(args, session_id=sid)
+                    return notes.delete_note(args, session_id=sid)
                 raise KeyError(name)
 
             logger.info("live.tool.offloaded_to_thread tool_name=%s", name)

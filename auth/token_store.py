@@ -193,9 +193,9 @@ class KeyringTokenStore(TokenStore):
             self._keyring.set_password(self._service, google_sub, manifest)
             manifest_written = True
 
-            index = set(self.list_subs())
-            index.add(google_sub)
-            self._keyring.set_password(self._service, self._index_user, json.dumps(sorted(index)))
+            subs = set(self.list_subs())
+            subs.add(google_sub)
+            self._keyring.set_password(self._service, self._index_user, json.dumps(sorted(subs)))
 
             # Drop leftover chunks from a previous larger save.
             for stale in range(len(chunks), _MAX_CHUNKS):
@@ -252,9 +252,9 @@ class KeyringTokenStore(TokenStore):
         self._delete_password(google_sub)
         for index in range(max(chunk_count, _MAX_CHUNKS)):
             self._delete_password(self._chunk_key(google_sub, index))
-        index = [s for s in self.list_subs() if s != google_sub]
+        remaining = [s for s in self.list_subs() if s != google_sub]
         try:
-            self._keyring.set_password(self._service, self._index_user, json.dumps(index))
+            self._keyring.set_password(self._service, self._index_user, json.dumps(remaining))
         except Exception:
             pass
         logger.info("Deleted Google credentials for sub=%s…", google_sub[:8])

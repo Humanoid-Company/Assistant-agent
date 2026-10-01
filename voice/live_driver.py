@@ -25,6 +25,14 @@ logger = logging.getLogger(__name__)
 
 
 class LiveDriverMixin:
+    # Set up by Assistant.__init__ / the awake-session loop.
+    _live: LiveVoiceSession | None
+    _running: bool
+    _history: list[dict]
+    _history_cutoff: int | None
+    _pending_cutoff: int
+    _live_user_frag: str
+    _live_pending_robot: str | None
     def _run_awake_session_live(self) -> None:
         """GPT-Live path: full duplex + Responses delegation. No manual turn create."""
         self._sleep_requested = False

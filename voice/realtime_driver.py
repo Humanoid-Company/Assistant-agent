@@ -32,6 +32,18 @@ logger = logging.getLogger(__name__)
 
 
 class RealtimeDriverMixin:
+    # Set up by Assistant.__init__ / the awake-session loop.
+    rt: RealtimeConversation | None
+    _running: bool
+    _history: list[dict]
+    _history_cutoff: int | None
+    _pending_cutoff: int
+
+    def _active_rt(self) -> RealtimeConversation:
+        """The open Realtime session — tool handlers and turn checks only run inside one."""
+        if self.rt is None:
+            raise RuntimeError("Realtime handler called outside an awake session")
+        return self.rt
     def _run_awake_session_realtime(self) -> None:
         """Legacy Realtime path — preserved with existing workarounds."""
         self._sleep_requested = False
@@ -185,7 +197,7 @@ class RealtimeDriverMixin:
 
     def _run_web_search_realtime(self, call_id: str, args: dict) -> None:
         """Realtime: return structured search JSON and let the model voice a short summary."""
-        rt = self.rt
+        rt = self._active_rt()
 
         def worker() -> None:
             try:
@@ -241,7 +253,7 @@ class RealtimeDriverMixin:
         return said or None
 
     def _run_router_tool(self, call_id: str, fn) -> None:
-        rt = self.rt
+        rt = self._active_rt()
 
         def worker() -> None:
             try:
@@ -289,7 +301,7 @@ class RealtimeDriverMixin:
 
     def _dispatch_task(self, call_id: str, task: str) -> None:
         """Run free-text through the local Agent Router on a background thread."""
-        rt = self.rt
+        rt = self._active_rt()
         session_id = self._router_session_id
 
         def worker() -> None:
@@ -305,7 +317,7 @@ class RealtimeDriverMixin:
         threading.Thread(target=worker, daemon=True, name="router-dispatch").start()
 
     def _check_connection(self, call_id: str) -> None:
-        rt = self.rt
+        rt = self._active_rt()
 
         def worker() -> None:
             result = _run_connectivity_checks(self.router)
@@ -321,7 +333,7 @@ class RealtimeDriverMixin:
         pass — running two different STT engines on the same audio let them
         disagree (e.g. session heard "Іде вперед", a parallel Google STT pass
         heard something else entirely), silently swallowing real matches."""
-        text = self.rt.pump_for_transcript(timeout=1.5)
+        text = self._active_rt().pump_for_transcript(timeout=1.5)
         if not text:
             logger.info("[robot-trigger] no transcript received (timeout/empty) — falling back to model")
             return None
@@ -341,17 +353,17 @@ class RealtimeDriverMixin:
             return
         try:
             method()
-            self.rt.say(_ROBOT_ACTION_TEXT.get(action, "Готово."))
+            self._active_rt().say(_ROBOT_ACTION_TEXT.get(action, "Готово."))
         except Exception as exc:
             logger.error("Robot trigger action %r failed: %s", action, exc, exc_info=True)
-            self.rt.say("Не вдалося виконати команду роботом.")
+            self._active_rt().say("Не вдалося виконати команду роботом.")
 
     def _handle_robot_action(self, call_id: str, action: str) -> None:
         """Runs the physical action on a background thread — real hardware
         calls (movement) aren't instant, so this follows the same deferred-
         result pattern as _dispatch_task rather than blocking the live
         conversation."""
-        rt = self.rt
+        rt = self._active_rt()
         method = getattr(self.robot, action, None) if action in ROBOT_ACTIONS else None
 
         def worker() -> None:

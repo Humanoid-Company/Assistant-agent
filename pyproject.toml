@@ -51,3 +51,14 @@ ignore_missing_imports = true
 check_untyped_defs = false
 warn_unused_ignores = true
 exclude = ['^\.venv/', '^tests/']
+
+# Mixins use attributes/methods set up by the concrete class (CalendarAgent / Assistant).
+[[tool.mypy.overrides]]
+module = [
+    "agents.calendar_create",
+    "agents.calendar_edit",
+    "agents.calendar_execution",
+    "voice.realtime_driver",
+    "voice.live_driver",
+]
+disable_error_code = ["attr-defined"]
