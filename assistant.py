@@ -33,8 +33,6 @@ from config import (
     GOOGLE_ACCOUNT_STATE_FILE,
     GOOGLE_CALENDAR_TIMEZONE,
     GOOGLE_OAUTH_CLIENT_SECRETS_FILE,
-    ROBOT_BACKEND,
-    ROBOT_NETWORK_INTERFACE,
     SYSTEM_PROMPT,
     TRIGGER_PHRASES,
     VOICE_ENGINE,
@@ -44,7 +42,6 @@ from integrations.web_search import (
     WebSearchRateLimiter,
 )
 from realtime_client import RealtimeConversation
-from robot_control import ROBOT_ACTIONS, create_robot_controller
 from router.factory import build_agent_router
 from speech_to_text import SpeechToText
 from text_to_speech import TextToSpeech
@@ -122,9 +119,6 @@ class Assistant(RealtimeDriverMixin, LiveDriverMixin):
         # Realtime: process restart required. Live: session restart only.
         self._voice_change_pending = False
         self._voice_engine = normalize_voice_engine(VOICE_ENGINE)
-        # Set when the model itself called control_robot for the current user turn, so the
-        # local trigger fast-path does not run the same physical action a second time.
-        self._model_robot_action_this_turn = False
         # Outcome of a Google consent that finished while no voice session was open.
         self._deferred_announcement: str | None = None
 
@@ -135,9 +129,6 @@ class Assistant(RealtimeDriverMixin, LiveDriverMixin):
         # Long-term memory (persists between sessions)
         self._memory: dict = self._load_memory()
 
-        # Physical robot commands — "stub" backend (no hardware) until
-        # ROBOT_BACKEND is switched over in .env.
-        self.robot = create_robot_controller(ROBOT_BACKEND, ROBOT_NETWORK_INTERFACE)
 
         # Local Google Agent Router (Calendar + Gmail) — Gmail stays on Realtime only.
         self.router = build_agent_router(
@@ -170,7 +161,6 @@ class Assistant(RealtimeDriverMixin, LiveDriverMixin):
         executor.register("end_conversation", self._live_end_conversation, run_in_thread=False)
         # Blocking network / browser / hardware work must leave the Live event loop.
         executor.register("check_connection", self._live_check_connection, run_in_thread=True)
-        executor.register("control_robot", self._live_control_robot, run_in_thread=True)
         executor.register("google_account", self._live_google_account, run_in_thread=True)
         executor.register("web_search", self._live_web_search, run_in_thread=True)
         return executor
@@ -180,12 +170,6 @@ class Assistant(RealtimeDriverMixin, LiveDriverMixin):
     def run(self) -> None:
         self._running = True
         logger.info("Assistant started. voice_engine=%s", self._voice_engine)
-        # Unambiguous startup marker — if this line is missing from the console
-        # on launch, the running process is NOT this code (stale process from
-        # before robot_control.py existed, wrong directory, etc.).
-        logger.info(
-            "Robot control ready — backend=%r, actions=%s", ROBOT_BACKEND, ROBOT_ACTIONS
-        )
         threading.Thread(target=self._connectivity_watch_loop, daemon=True, name="connectivity-watch").start()
         self.tts.speak("Асистент готовий. Скажіть «привіт» щоб почати.")
 

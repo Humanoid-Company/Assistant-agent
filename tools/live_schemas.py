@@ -1,7 +1,6 @@
 """OpenAI Responses function schemas for the GPT-Live backend."""
 from __future__ import annotations
 
-from robot_control import ROBOT_ACTIONS
 from voice.options import LANGUAGE_OPTIONS, VOICE_OPTIONS
 
 _CALENDAR_PROPS = {
@@ -339,11 +338,5 @@ LIVE_BACKEND_TOOLS: list[dict] = [
         "check_connection",
         "Check Google auth/API connectivity. Only on explicit user request.",
         {},
-    ),
-    _fn(
-        "control_robot",
-        "Physical robot action when the user explicitly requests motion/pose.",
-        {"action": {"type": "string", "enum": list(ROBOT_ACTIONS)}},
-        required=["action"],
     ),
 ]

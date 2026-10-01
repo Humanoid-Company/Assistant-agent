@@ -11,8 +11,6 @@ from config import (
     REALTIME_VOICE,
 )
 from realtime_client import RealtimeConversation
-from robot_control import ROBOT_ACTIONS
-from robot_triggers import _ROBOT_ACTION_TEXT, _match_robot_trigger
 from tools.realtime_schemas import _NO_FOLLOWUP_TOOLS, _SILENT_TOOLS, TOOLS
 from tools.router_bridge import (
     _describe_connection_status,
@@ -82,15 +80,7 @@ class RealtimeDriverMixin:
                 pcm = self.rt.pump(timeout=0.05)
                 if pcm:
                     self._pending_cutoff = len(self.rt.get_turns())
-                    # Speculative: the model starts on the reply now, in parallel with the
-                    # input transcription (~0.3–1.5 s) that the robot fast-path needs.
-                    # A matched robot command takes the turn back via cancel_reply().
-                    self._model_robot_action_this_turn = False
                     self.rt.create_response()
-                    action = self._check_robot_trigger()
-                    if action and not self._model_robot_action_this_turn:
-                        self.rt.cancel_reply()
-                        self._execute_robot_trigger(action)
 
             logger.info("[latency] Awake session duration: %.1fs", time.monotonic() - t_start)
 
@@ -149,10 +139,6 @@ class RealtimeDriverMixin:
                 emotion = args.get("emotion", "").strip()
                 logger.info("[emotion] %s", emotion)
                 return ""
-            if name == "control_robot":
-                self._model_robot_action_this_turn = True
-                self._handle_robot_action(call_id, args.get("action", "").strip().lower())
-                return None
             if name == "google_account":
                 self._run_router_tool(call_id, lambda: self._google_account(args))
                 return None
@@ -327,57 +313,3 @@ class RealtimeDriverMixin:
             rt.submit_deferred_tool_result(call_id, _describe_connection_status(result))
 
         threading.Thread(target=worker, daemon=True, name="connection-check").start()
-
-    def _check_robot_trigger(self) -> str | None:
-        """Waits for this session's own input transcription of the utterance
-        that just finished, checked against ROBOT_TRIGGER_PHRASES BEFORE the
-        turn reaches the model. Uses the Realtime session's own transcript
-        (gpt-4o-mini-transcribe) rather than a second, separate Google STT
-        pass — running two different STT engines on the same audio let them
-        disagree (e.g. session heard "Іде вперед", a parallel Google STT pass
-        heard something else entirely), silently swallowing real matches."""
-        text = self._active_rt().pump_for_transcript(timeout=1.5)
-        if not text:
-            logger.info("[robot-trigger] no transcript received (timeout/empty) — falling back to model")
-            return None
-        action = _match_robot_trigger(text.lower())
-        if action:
-            logger.info("[robot-trigger] %r -> %s (bypassing model)", text, action)
-        else:
-            logger.info("[robot-trigger] %r -> no match, falling back to model", text)
-        return action
-
-    def _execute_robot_trigger(self, action: str) -> None:
-        """Runs a trigger-matched action directly and speaks a scripted
-        confirmation via rt.say() — no tool call, no model involved, so
-        there's no call_id to report back to (unlike _handle_robot_action)."""
-        method = getattr(self.robot, action, None)
-        if method is None:
-            return
-        try:
-            method()
-            self._active_rt().say(_ROBOT_ACTION_TEXT.get(action, "Готово."))
-        except Exception as exc:
-            logger.error("Robot trigger action %r failed: %s", action, exc, exc_info=True)
-            self._active_rt().say("Не вдалося виконати команду роботом.")
-
-    def _handle_robot_action(self, call_id: str, action: str) -> None:
-        """Runs the physical action on a background thread — real hardware
-        calls (movement) aren't instant, so this follows the same deferred-
-        result pattern as _dispatch_task rather than blocking the live
-        conversation."""
-        rt = self._active_rt()
-        method = getattr(self.robot, action, None) if action in ROBOT_ACTIONS else None
-
-        def worker() -> None:
-            if method is None:
-                rt.submit_deferred_tool_result(call_id, f"Команда {action!r} не підтримується.")
-                return
-            try:
-                method()
-                rt.submit_deferred_tool_result(call_id, _ROBOT_ACTION_TEXT.get(action, "Готово."))
-            except Exception as exc:
-                logger.error("Robot action %r failed: %s", action, exc, exc_info=True)
-                rt.submit_deferred_tool_result(call_id, "Не вдалося виконати команду роботом.")
-
-        threading.Thread(target=worker, daemon=True, name="robot-action").start()

@@ -119,13 +119,6 @@ def _build_executor(user: WebUser) -> ToolExecutor:
     def end_conversation(args: dict, ctx: ToolExecutionContext) -> ToolResult:
         return ToolResult(ok=True, status="ok", message="Попрощайся коротко.")
 
-    def control_robot(args: dict, ctx: ToolExecutionContext) -> ToolResult:
-        return ToolResult(
-            ok=False,
-            status="error",
-            message="У веб-версії немає фізичного робота — рухатися я тут не можу.",
-        )
-
     executor.register("google_account", google_account, run_in_thread=True)
     executor.register("web_search", web_search, run_in_thread=True)
     executor.register("check_connection", check_connection, run_in_thread=True)
@@ -133,7 +126,6 @@ def _build_executor(user: WebUser) -> ToolExecutor:
     executor.register("change_language", change_language)
     executor.register("change_voice", change_voice)
     executor.register("end_conversation", end_conversation)
-    executor.register("control_robot", control_robot)
     return executor
 
 

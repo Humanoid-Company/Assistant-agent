@@ -27,7 +27,6 @@ n8n і зовнішній `agent-ecosystem` **не потрібні**.
 | `web_search` | контрольований пошук в інтернеті (Tavily; новини / факти / версії ПЗ) |
 | `dispatch_task` | вільний текст → той самий локальний роутер (сумісність) |
 | `check_connection` | стан Google-акаунта / API (не «чи живий n8n») |
-| `control_robot` | фізичні команди (`robot_control.py`, StubBackend за замовчуванням) |
 | `set_assistant_name`, `change_voice`, `change_language`, `end_conversation`, `note_emotion` | як раніше |
 
 ## Встановлення
@@ -101,16 +100,15 @@ Refresh tokens зберігаються в **OS keyring** (не в спільн�
 | `GOOGLE_ACCOUNT_STATE_FILE` | активний `sub` + display profiles (без секретів) |
 | `GOOGLE_CALENDAR_TIMEZONE` | дефолт `Europe/Kyiv` |
 | `CONNECTIVITY_CHECK_INTERVAL_S` | фоновий health (сек) |
-| `SHARED_DEVICE_MODE` | `true` = спільний ПК/робот (idle lock); `false` = особистий desktop |
+| `SHARED_DEVICE_MODE` | `true` = спільний ПК (idle lock); `false` = особистий desktop |
 | `SESSION_IDLE_TIMEOUT_S` | таймаут бездіяльності сесії Google (сек) у shared mode |
-| `ROBOT_BACKEND` | `stub` / `go2` / `humanoid` |
 
 ### Режими пристрою
 
 **Особистий desktop (`SHARED_DEVICE_MODE=false`, за замовчуванням):** активний Google-акаунт
 зберігається між запусками; зручно для одного користувача на своєму ПК.
 
-**Спільний ПК / робот (`SHARED_DEVICE_MODE=true`):** після idle timeout або «заблокуй сесію»
+**Спільний ПК (`SHARED_DEVICE_MODE=true`):** після idle timeout або «заблокуй сесію»
 `active_sub` скидається — наступна людина не отримає автоматичний доступ до чужої пошти.
 Після restart сесія також не відновлюється автоматично. Refresh tokens у keyring лишаються,
 але активна сесія — ні.

@@ -56,10 +56,6 @@ def test_voice_connect_request_points_to_the_page_button():
         user.executor.execute("google_account", {"action": "connect"}, ToolExecutionContext(session_id="s"))
     )
     assert "Підключити Google" in result.message
-    robot = asyncio.run(
-        user.executor.execute("control_robot", {"action": "sit"}, ToolExecutionContext(session_id="s"))
-    )
-    assert robot.ok is False
 
 
 def test_google_login_asks_for_everything_and_remembers_who_started_it():

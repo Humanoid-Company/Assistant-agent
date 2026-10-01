@@ -4,7 +4,6 @@ from __future__ import annotations
 from config import (
     ROUTER_TASK_CATEGORIES,
 )
-from robot_control import ROBOT_ACTIONS
 from voice.options import LANGUAGE_OPTIONS, VOICE_OPTIONS
 
 TOOLS: list[dict] = [
@@ -93,7 +92,7 @@ TOOLS: list[dict] = [
             "і повертаються одразу (consent_pending) — результат прийде окремо, не викликай повторно; "
             "reauth_switch (зміна акаунта ТІЛЬКИ через "
             "браузерний вибір — НЕ за названим email), lock_session (скинути активну сесію на "
-            "спільному ПК/роботі). Голос/email НЕ є доказом особи."
+            "спільному ПК). Голос/email НЕ є доказом особи."
         ),
         "parameters": {
             "type": "object",
@@ -297,20 +296,6 @@ TOOLS: list[dict] = [
             "явне 'перевір зв'язок' / 'чи все працює'. Відсутність входу — не аварія."
         ),
         "parameters": {"type": "object", "properties": {}},
-    },
-    {
-        "type": "function",
-        "name": "control_robot",
-        "description": (
-            "Виконати фізичну команду роботом (рух, поза, привітання). Викликай ЛИШЕ якщо "
-            "користувач явно попросив фізичну дію ('іди вперед', 'сядь', 'встань', 'зупинись', "
-            "'привітайся') — не вигадуй дій, яких немає серед доступних значень."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {"action": {"type": "string", "enum": list(ROBOT_ACTIONS)}},
-            "required": ["action"],
-        },
     },
 ]
 

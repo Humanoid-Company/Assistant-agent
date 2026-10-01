@@ -11,8 +11,6 @@ from config import (
 )
 from prompts.backend_prompt import build_backend_prompt
 from prompts.live_prompt import build_live_prompt
-from robot_control import ROBOT_ACTIONS
-from robot_triggers import _ROBOT_ACTION_TEXT, _match_robot_trigger
 from tools.executor import ToolExecutionContext
 from tools.results import ToolResult, agent_result_to_tool_result
 from tools.router_bridge import _run_connectivity_checks
@@ -31,8 +29,7 @@ class LiveDriverMixin:
     _history: list[dict]
     _history_cutoff: int | None
     _pending_cutoff: int
-    _live_user_frag: str
-    _live_pending_robot: str | None
+
     def _run_awake_session_live(self) -> None:
         """GPT-Live path: full duplex + Responses delegation. No manual turn create."""
         self._sleep_requested = False
@@ -47,7 +44,6 @@ class LiveDriverMixin:
             tool_executor=self._tool_executor,
             voice=voice,
             session_id=self._router_session_id,
-            on_user_transcript=self._on_live_user_transcript_fragment,
         )
         self._live = live
         try:
@@ -70,10 +66,7 @@ class LiveDriverMixin:
                 live.speak_context(pending)
             t_start = time.monotonic()
             while self._running and not live.sleep_requested and not self._sleep_requested:
-                # Live owns turn-taking; we only poll lifecycle flags + local robot safety.
-                action = self._match_pending_robot_from_live()
-                if action:
-                    self._execute_robot_trigger_live(action)
+                # Live owns turn-taking; we only poll lifecycle flags.
                 time.sleep(0.05)
             logger.info("[latency] Live awake session duration: %.1fs", time.monotonic() - t_start)
             live.stop_playback()
@@ -97,31 +90,6 @@ class LiveDriverMixin:
             else:
                 self.state = State.SLEEPING
                 time.sleep(1.5)
-
-    def _on_live_user_transcript_fragment(self, fragment: str) -> None:
-        # Accumulate for local robot fast-path; full turns flush inside LiveVoiceSession.
-        buf = getattr(self, "_live_user_frag", "") + fragment
-        self._live_user_frag = buf
-        action = _match_robot_trigger(buf.lower())
-        if action:
-            self._live_pending_robot = action
-            self._live_user_frag = ""
-
-    def _match_pending_robot_from_live(self) -> str | None:
-        action = getattr(self, "_live_pending_robot", None)
-        self._live_pending_robot = None
-        return action
-
-    def _execute_robot_trigger_live(self, action: str) -> None:
-        method = getattr(self.robot, action, None)
-        if method is None or self._live is None:
-            return
-        try:
-            method()
-            self._live.speak_context(_ROBOT_ACTION_TEXT.get(action, "Готово."))
-        except Exception as exc:
-            logger.error("Robot trigger action %r failed: %s", action, exc, exc_info=True)
-            self._live.speak_context("Не вдалося виконати команду роботом.")
 
     def _live_set_name(self, args: dict, context: ToolExecutionContext) -> ToolResult:
         del context
@@ -186,19 +154,6 @@ class LiveDriverMixin:
     def _live_check_connection(self, args: dict, context: ToolExecutionContext) -> ToolResult:
         del args, context
         return agent_result_to_tool_result(_run_connectivity_checks(self.router))
-
-    def _live_control_robot(self, args: dict, context: ToolExecutionContext) -> ToolResult:
-        del context
-        action = str(args.get("action", "")).strip().lower()
-        method = getattr(self.robot, action, None) if action in ROBOT_ACTIONS else None
-        if method is None:
-            return ToolResult(ok=False, status="error", message=f"Команда {action!r} не підтримується.")
-        try:
-            method()
-            return ToolResult(ok=True, status="ok", message=_ROBOT_ACTION_TEXT.get(action, "Готово."))
-        except Exception as exc:
-            logger.error("Robot action %r failed: %s", action, exc, exc_info=True)
-            return ToolResult(ok=False, status="error", message="Не вдалося виконати команду роботом.")
 
     def _live_google_account(self, args: dict, context: ToolExecutionContext) -> ToolResult:
         del context

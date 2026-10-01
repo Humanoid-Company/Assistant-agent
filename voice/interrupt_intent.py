@@ -1,6 +1,6 @@
 """Does the user actually want to interrupt the assistant? Decided from partial transcripts.
 
-The robot talks to live audiences, mostly over laptop/robot speakers without hardware echo
+The assistant often talks over laptop speakers, sometimes to a room, without hardware echo
 cancellation. While it speaks, the input transcript also catches listeners' backchannels
 ("угу", "ага"), laughter, side conversations and the assistant's own voice coming back
 through the mic. None of those should cut it off. Only a stop word or the user clearly

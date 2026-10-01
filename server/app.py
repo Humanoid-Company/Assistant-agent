@@ -54,9 +54,8 @@ FRONTEND_ORIGINS = [o.strip().rstrip("/") for o in os.getenv("FRONTEND_ORIGINS",
 ACCESS_CODE = os.getenv("ACCESS_CODE", "").strip()
 
 _WEB_NOTE = (
-    "\nWeb demo: you run in a browser tab for the team to try — there is no physical robot body "
-    "here, so don't offer to move. To connect Google the person presses the «Підключити Google» "
-    "button on the page; you will be told when the login finishes."
+    "\nWeb demo: you run in a browser tab for the team to try. To connect Google the person "
+    "presses the «Підключити Google» button on the page; you will be told when the login finishes."
 )
 _CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9-]{16,64}$")
 _background_tasks: set[asyncio.Task] = set()

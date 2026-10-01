@@ -78,7 +78,7 @@ class AccountManager:
 
     Modes (see config.SHARED_DEVICE_MODE):
     - personal desktop: active_sub persists; idle lock optional / disabled.
-    - shared device / robot: idle timeout clears active session so the next
+    - shared device: idle timeout clears active session so the next
       person cannot silently use the previous mailbox.
     """
 
@@ -138,7 +138,7 @@ class AccountManager:
             self._save_state()
 
     def lock_session(self) -> AccountStatus:
-        """Explicitly clear the active Google session (shared PC / robot hand-off)."""
+        """Explicitly clear the active Google session (shared PC hand-off)."""
         with self._lock:
             self._active_sub = None
             self._session_locked = True
@@ -373,7 +373,7 @@ class AccountManager:
     def switch_via_reauth(self) -> AuthAttemptResult:
         """Change active account only through a fresh browser OAuth (account chooser).
 
-        Spoken email is NOT accepted — that would let anyone on a shared robot
+        Spoken email is NOT accepted — that would let anyone on a shared device
         access a previously authorized mailbox by naming it.
         """
         return self.connect(full_access=True)

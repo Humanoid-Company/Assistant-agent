@@ -210,11 +210,6 @@ class RealtimeConversation:
         # can't loop forever even if the model calls another silent-only tool.
         self._next_response_is_forced_followup = False
         self._current_response_is_forced_followup = False
-        # Set (possibly to "") whenever a user-utterance transcription
-        # completes — consumed by pump_for_transcript() for deterministic
-        # trigger-phrase matching (assistant.py) without a second, separate
-        # STT pass that could disagree with what this session itself heard.
-        self._last_transcript: str | None = None
         self._silent_tool_used_this_response = False
         # Counts rather than a single flag: a tool call's function_call_output
         # triggers a follow-up create_response() *before* the tool-call
@@ -235,14 +230,6 @@ class RealtimeConversation:
         # against inventing a task result, added alongside this fix) instead of the real,
         # already-computed dispatch_task answer.
         self._deferred_response_requests: list[str | None] = []
-
-        # Speculative replies: the caller starts a reply at end-of-speech, before the
-        # transcript lands, and may then take the turn back (local robot command).
-        # Events of a cancelled response (audio, tool calls, transcript) are dropped.
-        self._current_response_id: str | None = None
-        self._awaiting_response_created = False
-        self._cancelled_response_ids: set[str] = set()
-        self._cancel_on_created_until = 0.0
 
         # Latency instrumentation.
         self._speech_stopped_at: float | None = None
@@ -390,26 +377,6 @@ class RealtimeConversation:
                 completed_pcm = pcm
         return completed_pcm
 
-    def pump_for_transcript(self, timeout: float = 1.5) -> str | None:
-        """Blocks until the input transcription for the utterance that just
-        finished (speech_stopped) arrives, or *timeout* elapses.
-
-        Used for deterministic robot-trigger matching: checking against this
-        session's own transcription (instead of a second, separate STT pass)
-        avoids the two engines disagreeing on what was said. Checks the
-        already-arrived value first — the completion event may land inside
-        the very same pump() call that returned the speech_stopped PCM.
-        """
-        deadline = time.monotonic() + timeout
-        while True:
-            if self._last_transcript is not None:
-                text, self._last_transcript = self._last_transcript, None
-                return text
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return None
-            self.pump(timeout=min(0.1, remaining))
-
     def wait_until_response_done(self, timeout: float = 8.0) -> None:
         """Block until the current in-flight response finishes (used before
         closing the session, so a farewell line isn't cut off)."""
@@ -442,20 +409,9 @@ class RealtimeConversation:
             if text:
                 logger.info("[user] %s", text)
                 self._turns.append({"role": "user", "content": text})
-            self._last_transcript = text
             return None
 
         if etype == "response.created":
-            self._awaiting_response_created = False
-            response_id = getattr(getattr(event, "response", None), "id", None)
-            self._current_response_id = response_id
-            if (
-                response_id
-                and not self._next_response_scripted
-                and time.monotonic() < self._cancel_on_created_until
-            ):
-                self._cancel_on_created_until = 0.0
-                self._cancel_response(response_id)
             self._current_response_scripted = self._next_response_scripted
             self._next_response_scripted = False
             self._current_response_is_forced_followup = self._next_response_is_forced_followup
@@ -468,8 +424,6 @@ class RealtimeConversation:
             return None
 
         if etype == "response.output_audio.delta":
-            if self._is_cancelled(event):
-                return None
             delta_b64 = getattr(event, "delta", "")
             if delta_b64:
                 if self._first_audio_at is None:
@@ -497,9 +451,6 @@ class RealtimeConversation:
         if etype == "response.function_call_arguments.done":
             call_id = getattr(event, "call_id", "")
             name = getattr(event, "name", "")
-            if self._is_cancelled(event):
-                logger.info("Tool call %s dropped — its response was cancelled (turn handled locally).", name)
-                return None
             args = parse_tool_arguments(getattr(event, "arguments", None))
             if args:
                 logger.info("Tool call: %s fields=%s", name, ",".join(sorted(str(key) for key in args)))
@@ -518,11 +469,6 @@ class RealtimeConversation:
             return None
 
         if etype == "response.done":
-            done_id = getattr(getattr(event, "response", None), "id", None)
-            was_cancelled_by_us = bool(done_id) and done_id in self._cancelled_response_ids
-            if was_cancelled_by_us:
-                self._cancelled_response_ids.discard(done_id)
-                self._assistant_transcript = ""
             got_speech = not self._current_response_scripted and bool(self._assistant_transcript)
             if got_speech:
                 self._turns.append({"role": "assistant", "content": self._assistant_transcript})
@@ -583,7 +529,7 @@ class RealtimeConversation:
         model call end_conversation during the "Слухаю!" greeting instead of
         just saying it, instantly ending the brand new session).
 
-        Blocks briefly if a response is still in flight (e.g. a robot-trigger
+        Blocks briefly if a response is still in flight (e.g. a scripted
         confirmation firing right as a forced silent-tool follow-up from the
         previous turn is still wrapping up) — the server rejects an
         overlapping response.create outright, and `say()`'s call sites are
@@ -634,39 +580,11 @@ class RealtimeConversation:
             self._deferred_response_requests.append(tool_choice)
             return
         self._next_response_scripted = False
-        self._awaiting_response_created = True
         self._request_response()
         payload: dict = {"type": "response.create"}
         if tool_choice is not None:
             payload["response"] = {"tool_choice": tool_choice}
         self._send(payload)
-
-    def cancel_reply(self) -> None:
-        """Take back the reply create_response() just started for this user turn.
-
-        Covers every stage it can be in: still queued behind another response, sent but
-        not yet created server-side, or already streaming.
-        """
-        if self._deferred_response_requests:
-            self._deferred_response_requests.pop()
-            return
-        if self._awaiting_response_created:
-            # Cancel it the moment response.created reveals its id (bounded so a lost
-            # event can never cancel some later, unrelated reply).
-            self._cancel_on_created_until = time.monotonic() + 3.0
-            return
-        if self._current_response_id and not self._current_response_scripted:
-            self._cancel_response(self._current_response_id)
-
-    def _cancel_response(self, response_id: str) -> None:
-        self._cancelled_response_ids.add(response_id)
-        self.player.stop()
-        self._send({"type": "response.cancel", "response_id": response_id})
-        logger.info("Response %s cancelled — turn handled locally.", response_id)
-
-    def _is_cancelled(self, event) -> bool:
-        response_id = getattr(event, "response_id", None)
-        return bool(response_id) and response_id in self._cancelled_response_ids
 
     def _request_response(self) -> None:
         self._responses_requested += 1
