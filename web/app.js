@@ -180,7 +180,9 @@
   // the user. Only the person at the mic counts ("near" voice — background talk, a TV, bangs
   // don't): their voice over the assistant ducks it a little; a stop word or real words from
   // them mute it and tell the model to stop. A sound alone never stops the assistant.
-  const STOP_WORDS = /(^|[^а-яіїєґ'])(стоп|зачекай|почекай|стривай|досить|хвилинку|секунду|stop|wait)([^а-яіїєґ']|$)/i;
+  // Whole words only; no «секунду»/«хвилинку» — they are everyday words, not a stop request.
+  const STOP_WORDS = new Set(["стоп", "зачекай", "почекай", "стривай", "досить", "stop", "wait"]);
+  const splitWords = (text) => text.toLowerCase().replace(/[ʼ’`]/g, "'").split(/[^а-яіїєґa-z'-]+/i).filter(Boolean);
   const BACKCHANNEL = new Set(["угу", "ага", "так", "ммм", "мм", "м", "ок", "окей", "добре", "ну", "ого", "ага-ага", "мгм", "ясно", "зрозуміло", "да"]);
   const barge = {
     audible: false,     // assistant audio is playing right now
@@ -290,12 +292,12 @@
     // heard with no one at the mic are background talk.
     if (!barge.speaking && Date.now() - barge.speechEndedAt > 1200) return;
     barge.heard += delta;
-    const text = barge.heard.toLowerCase().replace(/[ʼ’`]/g, "'");
-    if (STOP_WORDS.test(text)) { bargeConfirm("ack"); return; }
-    const words = text.split(/[^а-яіїєґa-z'-]+/i).filter(Boolean);
-    // Words the assistant itself just said are its echo, not the user.
-    const echo = new Set(barge.recentAssistant.toLowerCase().replace(/[ʼ’`]/g, "'").split(/[^а-яіїєґa-z'-]+/i));
-    const meaningful = words.filter((w) => !BACKCHANNEL.has(w) && !echo.has(w));
+    const words = splitWords(barge.heard);
+    // Words the assistant itself just said are its echo, not the user — stop words included.
+    const echo = new Set(splitWords(barge.recentAssistant));
+    const own = words.filter((w) => !echo.has(w));
+    if (own.some((w) => STOP_WORDS.has(w))) { bargeConfirm("ack"); return; }
+    const meaningful = own.filter((w) => !BACKCHANNEL.has(w));
     if (meaningful.length >= 3) bargeConfirm("stop");
   }
 
