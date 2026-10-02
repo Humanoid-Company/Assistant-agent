@@ -88,26 +88,33 @@
   // where timers are throttled to once a second, doesn't chop the user's speech.
   const GATE_WORKLET = `
     class NoiseGate extends AudioWorkletProcessor {
-      constructor() {
+      constructor(options) {
         super();
         this.frame = Math.round(sampleRate * 0.02);       // judge loudness per 20 ms
         this.ring = new Float32Array(Math.round(sampleRate * 0.06)); // 60 ms look-ahead
         this.pos = 0; this.sum = 0; this.outSum = 0; this.count = 0;
         this.floor = 0.003; this.open = false; this.loud = 0; this.quietFor = 1;
         this.gain = 0;
-        this.speaking = false;                            // user, short hangover (for barge-in)
+        // Barge-in only listens to "near" voice: the person at the mic is far louder than
+        // people talking in the background, a TV or a door bang (those are short).
+        this.near = (options.processorOptions || {}).near || 0.06;
+        this.speaking = false; this.nearFrames = 0; this.nearQuietFor = 1;
         this.audible = false; this.outQuietFor = 1;       // assistant playback
       }
       judge(level, outLevel) {
         if (outLevel > 0.01) this.outQuietFor = 0; else this.outQuietFor += 0.02;
         const audible = this.outQuietFor < 0.3;
         if (audible !== this.audible) { this.audible = audible; this.port.postMessage({ audible }); }
-        const threshold = Math.max(audible ? 0.035 : 0.012, this.floor * 3.5);
+        const threshold = Math.max(audible ? 0.04 : 0.015, this.floor * 4);
         if (level > threshold) { this.loud += 1; this.quietFor = 0; }
         else { this.quietFor += 0.02; if (level < threshold * 0.6) this.loud = 0; }
         if (!this.open && this.loud >= 2) this.open = true;
         else if (this.open && this.quietFor > 0.45) this.open = false;
-        const speaking = this.speaking ? this.quietFor <= 0.16 : this.loud >= 3;
+        const nearThreshold = Math.max(audible ? this.near * 1.3 : this.near, this.floor * 8);
+        if (level > nearThreshold) { this.nearFrames += 1; this.nearQuietFor = 0; }
+        else { this.nearQuietFor += 0.02; if (this.nearQuietFor > 0.25) this.nearFrames = 0; }
+        // Near voice: ~120 ms of loud frames to start (a click/bang is shorter), 250 ms gap to end.
+        const speaking = this.speaking ? this.nearQuietFor <= 0.25 : this.nearFrames >= 6;
         if (speaking !== this.speaking) { this.speaking = speaking; this.port.postMessage({ speaking }); }
         // Learn the room's noise only while nobody speaks, so a long sentence can't raise it.
         if (!this.open && !audible) {
@@ -151,6 +158,8 @@
       await ctx.resume();
       const node = new AudioWorkletNode(ctx, "noise-gate", {
         numberOfInputs: 2, channelCount: 1, channelCountMode: "explicit",
+        // ?near=0.04 makes barge-in more sensitive (quiet voice / far mic), 0.09 less.
+        processorOptions: { near: parseFloat(params.get("near")) || 0.06 },
       });
       node.port.onmessage = (e) => onSignal(e.data);
       const out = ctx.createMediaStreamDestination();
@@ -168,8 +177,9 @@
   }
 
   // Barge-in, like the desktop app: the Live model alone reacts slowly and keeps talking over
-  // the user. Voice over the assistant → its audio is ducked at once; real words, a stop word
-  // or ~0.8 s of voice → muted and the model is told to stop; a cough or «угу» → volume back.
+  // the user. Only the person at the mic counts ("near" voice — background talk, a TV, bangs
+  // don't): their voice over the assistant ducks it a little; a stop word or real words from
+  // them mute it and tell the model to stop. A sound alone never stops the assistant.
   const STOP_WORDS = /(^|[^а-яіїєґ'])(стоп|зачекай|почекай|стривай|досить|хвилинку|секунду|stop|wait)([^а-яіїєґ']|$)/i;
   const BACKCHANNEL = new Set(["угу", "ага", "так", "ммм", "мм", "м", "ок", "окей", "добре", "ну", "ого", "ага-ага", "мгм", "ясно", "зрозуміло", "да"]);
   const barge = {
@@ -179,7 +189,7 @@
     heard: "",          // user words since this barge-in candidate started
     timers: [],
     releaseTimer: null,
-    speechEndedAt: 0,
+    speechEndedAt: 0,   // when the near voice last stopped (transcripts lag behind it)
     recentAssistant: "", // for the echo check
   };
 
@@ -208,7 +218,6 @@
     const content = {
       ack: "Stop your previous answer immediately. Do not continue or resume it. Reply with at most one short acknowledgement such as «Добре.» Then wait silently for the user.",
       stop: "Stop speaking immediately. The user is talking. Do not finish or resume your previous sentence. Listen and answer what they say.",
-      unsure: "Pause — the user may be starting to talk. Listen. If they say something to you, answer that. If nobody actually spoke to you (noise, a cough, your own voice echoing), continue your previous answer from where you stopped, without repeating it from the beginning.",
     }[kind];
     try {
       if (channel && channel.readyState === "open") {
@@ -257,11 +266,10 @@
     if (signal.speaking) {
       clearTimeout(barge.releaseTimer);
       if (barge.stage !== "idle" || !barge.audible) return;
-      barge.heard = "";
+      if (Date.now() - barge.speechEndedAt > 1500) barge.heard = "";
       barge.timers.push(setTimeout(() => {
-        if (barge.speaking && barge.stage === "idle") { barge.stage = "ducked"; setRemoteVolume(0.2); }
-      }, 250));
-      barge.timers.push(setTimeout(() => { if (barge.speaking) bargeConfirm("unsure"); }, 800));
+        if (barge.speaking && barge.stage === "idle") { barge.stage = "ducked"; setRemoteVolume(0.5); }
+      }, 400));
     } else {
       barge.speechEndedAt = Date.now();
       if (barge.stage === "muted") { scheduleRelease(); return; }
@@ -278,6 +286,9 @@
   // User transcript while the assistant talks: decide by the words, not just the sound.
   function bargeOnWords(delta) {
     if (barge.stage === "muted" || !(barge.audible || barge.stage === "ducked")) return;
+    // Words count only while the near voice is on (or just ended — transcripts lag); words
+    // heard with no one at the mic are background talk.
+    if (!barge.speaking && Date.now() - barge.speechEndedAt > 1200) return;
     barge.heard += delta;
     const text = barge.heard.toLowerCase().replace(/[ʼ’`]/g, "'");
     if (STOP_WORDS.test(text)) { bargeConfirm("ack"); return; }
@@ -285,7 +296,7 @@
     // Words the assistant itself just said are its echo, not the user.
     const echo = new Set(barge.recentAssistant.toLowerCase().replace(/[ʼ’`]/g, "'").split(/[^а-яіїєґa-z'-]+/i));
     const meaningful = words.filter((w) => !BACKCHANNEL.has(w) && !echo.has(w));
-    if (meaningful.length >= 2) bargeConfirm("stop");
+    if (meaningful.length >= 3) bargeConfirm("stop");
   }
 
   function bargeOnAssistantText(delta) {
