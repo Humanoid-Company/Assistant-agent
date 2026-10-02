@@ -173,3 +173,27 @@ def test_new_call_closes_the_previous_one_of_the_same_browser(client, monkeypatc
     user.bridges.discard(old)
     assert [b.session_id for b in user.bridges] == ["sess-new"]
     user.bridges.clear()
+
+
+def test_keeps_itself_awake_only_when_deployed(monkeypatch):
+    import time
+
+    import httpx
+
+    pinged: list[str] = []
+
+    async def fake_get(self, url, **_kwargs):
+        pinged.append(url)
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    monkeypatch.setattr(web, "KEEP_AWAKE_S", 0.05)
+
+    monkeypatch.setattr(web, "PUBLIC_BACKEND_URL", "http://localhost:8000")
+    with TestClient(web.app):
+        time.sleep(0.2)
+    assert pinged == []
+
+    monkeypatch.setattr(web, "PUBLIC_BACKEND_URL", "https://backend.example")
+    with TestClient(web.app):
+        time.sleep(0.3)
+    assert pinged and set(pinged) == {"https://backend.example/healthz"}

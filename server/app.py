@@ -18,8 +18,10 @@ import html
 import logging
 import os
 import re
+from contextlib import asynccontextmanager
 from datetime import date
 
+import httpx
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -62,7 +64,35 @@ _WEB_NOTE = (
 _CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9-]{16,64}$")
 _background_tasks: set[asyncio.Task] = set()
 
-app = FastAPI(title="Voice agent web backend")
+# Free Render sleeps after ~15 min without inbound requests, and a restart forgets everyone's
+# Google login. While running, ping our own public URL (through Render's proxy, so it counts as
+# inbound traffic). It can't wake a sleeping server — the first visitor does that. 0 = off.
+# Note: one always-on free service uses ~744 of the 750 free instance hours a month.
+KEEP_AWAKE_S = float(os.getenv("KEEP_AWAKE_MINUTES", "10")) * 60
+
+
+async def _keep_awake() -> None:
+    async with httpx.AsyncClient(timeout=30) as http:
+        while True:
+            await asyncio.sleep(KEEP_AWAKE_S)
+            try:
+                await http.get(f"{PUBLIC_BACKEND_URL}/healthz")
+            except httpx.HTTPError:
+                logger.warning("keep-awake ping failed")
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    task = None
+    if KEEP_AWAKE_S > 0 and PUBLIC_BACKEND_URL.startswith("https://"):
+        task = asyncio.create_task(_keep_awake())
+        logger.info("keep-awake every %ss → %s/healthz", int(KEEP_AWAKE_S), PUBLIC_BACKEND_URL)
+    yield
+    if task is not None:
+        task.cancel()
+
+
+app = FastAPI(title="Voice agent web backend", lifespan=_lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=FRONTEND_ORIGINS,
