@@ -14,6 +14,8 @@ Prerequisites
 """
 import logging
 import sys
+from datetime import datetime
+from pathlib import Path
 
 from assistant import Assistant
 from config import PID_FILE
@@ -21,11 +23,18 @@ from instance_lock import AlreadyRunningError, SingleInstanceLock
 
 
 def setup_logging() -> None:
+    # Console + one file per run (logs/ is git-ignored) so a session can be reviewed later.
+    log_dir = Path(__file__).resolve().parent / "logs"
+    log_dir.mkdir(exist_ok=True)
+    log_file = log_dir / f"assistant-{datetime.now():%Y%m%d-%H%M%S}.log"
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)-8s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
-        stream=sys.stdout,
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler(log_file, encoding="utf-8"),
+        ],
     )
     # Suppress overly verbose third-party loggers.
     for noisy in ("httpx", "httpcore", "openai", "urllib3"):
