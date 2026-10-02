@@ -21,8 +21,15 @@
   let pc = null;
   let channel = null;
   let mic = null;
-  let currentMsg = null;
-  let currentRole = null;
+  let gate = null;
+  // One open bubble per speaker: user and assistant transcripts arrive interleaved when they
+  // overlap, and a single "current" bubble shredded both into word fragments.
+  const openMsg = { user: null, assistant: null };
+  const lastDeltaAt = { user: 0, assistant: 0 };
+  const TURN_PAUSE_MS = 1500;
+  let assistantSpeaking = false;
+  // Google account the current chat belongs to: undefined = not known yet.
+  let chatEmail;
 
   const headers = () => ({
     "Content-Type": "application/json",
@@ -48,12 +55,86 @@
 
   function appendTranscript(role, delta) {
     if (!delta) return;
-    if (currentRole !== role || !currentMsg) {
-      currentMsg = addLine(role, "");
-      currentRole = role;
+    const now = Date.now();
+    const other = role === "user" ? "assistant" : "user";
+    // A new turn starts after a pause, or once the other side has spoken since this bubble.
+    if (!openMsg[role] || now - lastDeltaAt[role] > TURN_PAUSE_MS || lastDeltaAt[other] > lastDeltaAt[role] + TURN_PAUSE_MS) {
+      openMsg[role] = addLine(role, "");
     }
-    currentMsg.textContent += delta;
+    lastDeltaAt[role] = now;
+    if (role === "assistant") assistantSpeaking = true;
+    openMsg[role].textContent += delta;
     $("log").scrollTop = $("log").scrollHeight;
+  }
+
+  function closeBubbles() {
+    openMsg.user = openMsg.assistant = null;
+    lastDeltaAt.user = lastDeltaAt.assistant = 0;
+  }
+
+  function clearLog() {
+    closeBubbles();
+    $("log").replaceChildren();
+    const empty = document.createElement("p");
+    empty.className = "muted empty";
+    empty.textContent = "Тут з'являтиметься текст розмови.";
+    $("log").appendChild(empty);
+  }
+
+  // Noise gate between the mic and WebRTC: background sounds (typing, TV, people nearby)
+  // never reach the model, only speech louder than the room's noise floor does. While the
+  // assistant talks the bar is higher, so leftover speaker echo doesn't interrupt it.
+  // ?gate=off turns it off.
+  function createNoiseGate(stream) {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx || params.get("gate") === "off") return null;
+    const ctx = new AudioCtx();
+    ctx.resume().catch(() => {});
+    const source = ctx.createMediaStreamSource(stream);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 1024;
+    // Delay the audio a little so the gate opens before the first syllable passes through.
+    const delay = ctx.createDelay(0.2);
+    delay.delayTime.value = 0.06;
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+    const out = ctx.createMediaStreamDestination();
+    source.connect(analyser);
+    source.connect(delay).connect(gain).connect(out);
+
+    const buf = new Float32Array(analyser.fftSize);
+    let floor = 0.003;
+    let open = false;
+    let loudFrames = 0;
+    let lastLoud = 0;
+    const timer = setInterval(() => {
+      analyser.getFloatTimeDomainData(buf);
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+      const level = Math.sqrt(sum / buf.length);
+      // Noise floor: follows quiet moments fast, creeps up slowly under steady noise.
+      floor = level < floor ? floor * 0.7 + level * 0.3 : floor + (level - floor) * 0.003;
+      const now = Date.now();
+      if (assistantSpeaking && now - lastDeltaAt.assistant > 1200) assistantSpeaking = false;
+      const threshold = Math.max(assistantSpeaking ? 0.035 : 0.012, floor * 3.5);
+      if (level > threshold) {
+        loudFrames += 1;
+        lastLoud = now;
+      } else if (level < threshold * 0.6) {
+        loudFrames = 0;
+      }
+      if (!open && loudFrames >= 2) {
+        open = true;
+        gain.gain.setTargetAtTime(1, ctx.currentTime, 0.005);
+      } else if (open && now - lastLoud > 450) {
+        open = false;
+        gain.gain.setTargetAtTime(0, ctx.currentTime, 0.04);
+      }
+    }, 20);
+    return {
+      track: out.stream.getAudioTracks()[0],
+      close() { clearInterval(timer); ctx.close().catch(() => {}); },
+    };
   }
 
   function onServerEvent(raw) {
@@ -97,7 +178,9 @@
       pc.onconnectionstatechange = () => {
         if (pc && ["failed", "disconnected"].includes(pc.connectionState)) stop("З'єднання втрачено");
       };
-      mic.getTracks().forEach((track) => pc.addTrack(track, mic));
+      gate = createNoiseGate(mic);
+      if (gate) pc.addTrack(gate.track, mic);
+      else mic.getTracks().forEach((track) => pc.addTrack(track, mic));
       channel = pc.createDataChannel("oai-events");
       channel.onmessage = (e) => onServerEvent(e.data);
 
@@ -130,10 +213,11 @@
   function stop(text = "Не підключено", state = "") {
     try { if (channel && channel.readyState === "open") channel.send(JSON.stringify({ type: "session.close" })); } catch { /* ignore */ }
     if (pc) { pc.close(); pc = null; }
+    if (gate) { gate.close(); gate = null; }
     if (mic) { mic.getTracks().forEach((t) => t.stop()); mic = null; }
     channel = null;
-    currentMsg = null;
-    currentRole = null;
+    assistantSpeaking = false;
+    closeBubbles();
     setStatus(text, state);
     $("talk").textContent = "Почати розмову";
     $("talk").classList.add("primary");
@@ -148,6 +232,7 @@
       if (res.status === 401) { showGate(); return; }
       if (!res.ok) return;
       const { google } = await res.json();
+      onAccount(google.connected ? google.email || "" : null);
       const pill = $("googleState");
       if (!google.connected) {
         pill.textContent = "не підключено";
@@ -166,6 +251,20 @@
       $("googleConnect").textContent = missing.length ? "Додати дозволи" : "Змінити акаунт";
       $("googleDisconnect").hidden = false;
     } catch { /* backend asleep / offline: keep the old state */ }
+  }
+
+  // Another Google account (or signing out) means another person: the old chat and the Live
+  // session that remembers it are dropped, and a running call restarts fresh. The first login
+  // during a call keeps it — that's the same person, and the agent is told the login finished.
+  function onAccount(email) {
+    const previous = chatEmail;
+    chatEmail = email;
+    if (previous === undefined || previous === email || previous === null) return;
+    const wasTalking = Boolean(pc);
+    if (wasTalking) stop();
+    clearLog();
+    addLine("system", email ? "Новий користувач: " + email + " — нова розмова." : "Акаунт Google відключено — нова розмова.");
+    if (wasTalking) start();
   }
 
   function connectGoogle() {

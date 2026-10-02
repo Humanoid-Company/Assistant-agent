@@ -27,3 +27,4 @@ private_logs/
 # Archives / lock leftovers
 *.rar
 *.zip
+logs/
