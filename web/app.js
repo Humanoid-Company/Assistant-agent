@@ -27,7 +27,6 @@
   const openMsg = { user: null, assistant: null };
   const lastDeltaAt = { user: 0, assistant: 0 };
   const TURN_PAUSE_MS = 1500;
-  let assistantSpeaking = false;
   // Google account the current chat belongs to: undefined = not known yet.
   let chatEmail;
 
@@ -62,7 +61,6 @@
       openMsg[role] = addLine(role, "");
     }
     lastDeltaAt[role] = now;
-    if (role === "assistant") assistantSpeaking = true;
     openMsg[role].textContent += delta;
     $("log").scrollTop = $("log").scrollHeight;
   }
@@ -83,58 +81,215 @@
 
   // Noise gate between the mic and WebRTC: background sounds (typing, TV, people nearby)
   // never reach the model, only speech louder than the room's noise floor does. While the
-  // assistant talks the bar is higher, so leftover speaker echo doesn't interrupt it.
-  // ?gate=off turns it off.
-  function createNoiseGate(stream) {
+  // assistant is audible the bar is higher, so leftover speaker echo doesn't interrupt it.
+  // It also hears the assistant's own audio (2nd input) and reports to the page when the
+  // user starts/stops talking and when the assistant is audible — that drives barge-in.
+  // ?gate=off turns it off. It runs on the audio thread (AudioWorklet), so a background tab,
+  // where timers are throttled to once a second, doesn't chop the user's speech.
+  const GATE_WORKLET = `
+    class NoiseGate extends AudioWorkletProcessor {
+      constructor() {
+        super();
+        this.frame = Math.round(sampleRate * 0.02);       // judge loudness per 20 ms
+        this.ring = new Float32Array(Math.round(sampleRate * 0.06)); // 60 ms look-ahead
+        this.pos = 0; this.sum = 0; this.outSum = 0; this.count = 0;
+        this.floor = 0.003; this.open = false; this.loud = 0; this.quietFor = 1;
+        this.gain = 0;
+        this.speaking = false;                            // user, short hangover (for barge-in)
+        this.audible = false; this.outQuietFor = 1;       // assistant playback
+      }
+      judge(level, outLevel) {
+        if (outLevel > 0.01) this.outQuietFor = 0; else this.outQuietFor += 0.02;
+        const audible = this.outQuietFor < 0.3;
+        if (audible !== this.audible) { this.audible = audible; this.port.postMessage({ audible }); }
+        const threshold = Math.max(audible ? 0.035 : 0.012, this.floor * 3.5);
+        if (level > threshold) { this.loud += 1; this.quietFor = 0; }
+        else { this.quietFor += 0.02; if (level < threshold * 0.6) this.loud = 0; }
+        if (!this.open && this.loud >= 2) this.open = true;
+        else if (this.open && this.quietFor > 0.45) this.open = false;
+        const speaking = this.speaking ? this.quietFor <= 0.16 : this.loud >= 3;
+        if (speaking !== this.speaking) { this.speaking = speaking; this.port.postMessage({ speaking }); }
+        // Learn the room's noise only while nobody speaks, so a long sentence can't raise it.
+        if (!this.open && !audible) {
+          this.floor = level < this.floor ? this.floor * 0.7 + level * 0.3 : this.floor + (level - this.floor) * 0.01;
+        }
+      }
+      process(inputs, outputs) {
+        const input = inputs[0][0];
+        const remote = inputs[1] && inputs[1][0];
+        const output = outputs[0][0];
+        if (!input || !output) return true;
+        for (let i = 0; i < input.length; i++) {
+          const x = input[i];
+          this.sum += x * x;
+          if (remote) this.outSum += remote[i] * remote[i];
+          if (++this.count >= this.frame) {
+            this.judge(Math.sqrt(this.sum / this.count), Math.sqrt(this.outSum / this.count));
+            this.sum = 0; this.outSum = 0; this.count = 0;
+          }
+          const delayed = this.ring[this.pos];
+          this.ring[this.pos] = x;
+          this.pos = (this.pos + 1) % this.ring.length;
+          this.gain += ((this.open ? 1 : 0) - this.gain) * (this.open ? 0.004 : 0.0005);
+          output[i] = delayed * this.gain;
+        }
+        for (let c = 1; c < outputs[0].length; c++) outputs[0][c].set(output);
+        return true;
+      }
+    }
+    registerProcessor("noise-gate", NoiseGate);
+  `;
+
+  async function createNoiseGate(stream, onSignal) {
     const AudioCtx = window.AudioContext || window.webkitAudioContext;
     if (!AudioCtx || params.get("gate") === "off") return null;
     const ctx = new AudioCtx();
-    ctx.resume().catch(() => {});
-    const source = ctx.createMediaStreamSource(stream);
-    const analyser = ctx.createAnalyser();
-    analyser.fftSize = 1024;
-    // Delay the audio a little so the gate opens before the first syllable passes through.
-    const delay = ctx.createDelay(0.2);
-    delay.delayTime.value = 0.06;
-    const gain = ctx.createGain();
-    gain.gain.value = 0;
-    const out = ctx.createMediaStreamDestination();
-    source.connect(analyser);
-    source.connect(delay).connect(gain).connect(out);
+    try {
+      if (!ctx.audioWorklet) throw new Error("no AudioWorklet");
+      const url = URL.createObjectURL(new Blob([GATE_WORKLET], { type: "application/javascript" }));
+      try { await ctx.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
+      await ctx.resume();
+      const node = new AudioWorkletNode(ctx, "noise-gate", {
+        numberOfInputs: 2, channelCount: 1, channelCountMode: "explicit",
+      });
+      node.port.onmessage = (e) => onSignal(e.data);
+      const out = ctx.createMediaStreamDestination();
+      ctx.createMediaStreamSource(stream).connect(node, 0, 0).connect(out);
+      return {
+        track: out.stream.getAudioTracks()[0],
+        // The assistant's audio, measured only (never played from here).
+        listenTo(remote) { ctx.createMediaStreamSource(remote).connect(node, 0, 1); },
+        close() { ctx.close().catch(() => {}); },
+      };
+    } catch {
+      ctx.close().catch(() => {});
+      return null; // old browser: send the mic as is
+    }
+  }
 
-    const buf = new Float32Array(analyser.fftSize);
-    let floor = 0.003;
-    let open = false;
-    let loudFrames = 0;
-    let lastLoud = 0;
-    const timer = setInterval(() => {
-      analyser.getFloatTimeDomainData(buf);
-      let sum = 0;
-      for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
-      const level = Math.sqrt(sum / buf.length);
-      // Noise floor: follows quiet moments fast, creeps up slowly under steady noise.
-      floor = level < floor ? floor * 0.7 + level * 0.3 : floor + (level - floor) * 0.003;
-      const now = Date.now();
-      if (assistantSpeaking && now - lastDeltaAt.assistant > 1200) assistantSpeaking = false;
-      const threshold = Math.max(assistantSpeaking ? 0.035 : 0.012, floor * 3.5);
-      if (level > threshold) {
-        loudFrames += 1;
-        lastLoud = now;
-      } else if (level < threshold * 0.6) {
-        loudFrames = 0;
+  // Barge-in, like the desktop app: the Live model alone reacts slowly and keeps talking over
+  // the user. Voice over the assistant → its audio is ducked at once; real words, a stop word
+  // or ~0.8 s of voice → muted and the model is told to stop; a cough or «угу» → volume back.
+  const STOP_WORDS = /(^|[^а-яіїєґ'])(стоп|зачекай|почекай|стривай|досить|хвилинку|секунду|stop|wait)([^а-яіїєґ']|$)/i;
+  const BACKCHANNEL = new Set(["угу", "ага", "так", "ммм", "мм", "м", "ок", "окей", "добре", "ну", "ого", "ага-ага", "мгм", "ясно", "зрозуміло", "да"]);
+  const barge = {
+    audible: false,     // assistant audio is playing right now
+    speaking: false,    // user voice right now
+    stage: "idle",      // idle → ducked → muted
+    heard: "",          // user words since this barge-in candidate started
+    timers: [],
+    releaseTimer: null,
+    speechEndedAt: 0,
+    recentAssistant: "", // for the echo check
+  };
+
+  function bargeClear() {
+    barge.timers.forEach(clearTimeout);
+    barge.timers = [];
+  }
+
+  function setRemoteVolume(volume) {
+    const el = $("remote");
+    el.volume = volume;
+    el.muted = volume === 0;
+  }
+
+  function bargeReset() {
+    bargeClear();
+    clearTimeout(barge.releaseTimer);
+    barge.stage = "idle";
+    barge.heard = "";
+    barge.speaking = false;
+    barge.audible = false;
+    setRemoteVolume(1);
+  }
+
+  function steer(kind) {
+    const content = {
+      ack: "Stop your previous answer immediately. Do not continue or resume it. Reply with at most one short acknowledgement such as «Добре.» Then wait silently for the user.",
+      stop: "Stop speaking immediately. The user is talking. Do not finish or resume your previous sentence. Listen and answer what they say.",
+      unsure: "Pause — the user may be starting to talk. Listen. If they say something to you, answer that. If nobody actually spoke to you (noise, a cough, your own voice echoing), continue your previous answer from where you stopped, without repeating it from the beginning.",
+    }[kind];
+    try {
+      if (channel && channel.readyState === "open") {
+        channel.send(JSON.stringify({
+          type: "session.instructions.append",
+          content,
+          delegation_id: null,
+          event_id: "barge_" + Math.random().toString(16).slice(2, 10),
+        }));
       }
-      if (!open && loudFrames >= 2) {
-        open = true;
-        gain.gain.setTargetAtTime(1, ctx.currentTime, 0.005);
-      } else if (open && now - lastLoud > 450) {
-        open = false;
-        gain.gain.setTargetAtTime(0, ctx.currentTime, 0.04);
+    } catch { /* channel closing */ }
+  }
+
+  function bargeConfirm(kind) {
+    if (barge.stage === "muted") return;
+    bargeClear();
+    barge.stage = "muted";
+    setRemoteVolume(0);
+    steer(kind);
+    scheduleRelease();
+  }
+
+  // Unmute once the interrupted answer has stopped (assistant quiet) and the user is done, or
+  // at the latest 1.5 s after the user stopped — the model may go straight into a new reply.
+  function scheduleRelease() {
+    clearTimeout(barge.releaseTimer);
+    if (barge.stage !== "muted") return;
+    if (barge.speaking) return; // re-checked when the user stops
+    const sinceSpeech = Date.now() - barge.speechEndedAt;
+    if (!barge.audible || sinceSpeech > 1500) {
+      barge.stage = "idle";
+      barge.heard = "";
+      setRemoteVolume(1);
+      return;
+    }
+    barge.releaseTimer = setTimeout(scheduleRelease, 100);
+  }
+
+  function onGateSignal(signal) {
+    if ("audible" in signal) {
+      barge.audible = signal.audible;
+      if (barge.stage === "muted") scheduleRelease();
+      return;
+    }
+    barge.speaking = signal.speaking;
+    if (signal.speaking) {
+      clearTimeout(barge.releaseTimer);
+      if (barge.stage !== "idle" || !barge.audible) return;
+      barge.heard = "";
+      barge.timers.push(setTimeout(() => {
+        if (barge.speaking && barge.stage === "idle") { barge.stage = "ducked"; setRemoteVolume(0.2); }
+      }, 250));
+      barge.timers.push(setTimeout(() => { if (barge.speaking) bargeConfirm("unsure"); }, 800));
+    } else {
+      barge.speechEndedAt = Date.now();
+      if (barge.stage === "muted") { scheduleRelease(); return; }
+      bargeClear();
+      if (barge.stage === "ducked") {
+        // A short sound: wait briefly for its transcript, else it was a cough / «угу».
+        barge.timers.push(setTimeout(() => {
+          if (barge.stage === "ducked" && !barge.speaking) { barge.stage = "idle"; barge.heard = ""; setRemoteVolume(1); }
+        }, 400));
       }
-    }, 20);
-    return {
-      track: out.stream.getAudioTracks()[0],
-      close() { clearInterval(timer); ctx.close().catch(() => {}); },
-    };
+    }
+  }
+
+  // User transcript while the assistant talks: decide by the words, not just the sound.
+  function bargeOnWords(delta) {
+    if (barge.stage === "muted" || !(barge.audible || barge.stage === "ducked")) return;
+    barge.heard += delta;
+    const text = barge.heard.toLowerCase().replace(/[ʼ’`]/g, "'");
+    if (STOP_WORDS.test(text)) { bargeConfirm("ack"); return; }
+    const words = text.split(/[^а-яіїєґa-z'-]+/i).filter(Boolean);
+    // Words the assistant itself just said are its echo, not the user.
+    const echo = new Set(barge.recentAssistant.toLowerCase().replace(/[ʼ’`]/g, "'").split(/[^а-яіїєґa-z'-]+/i));
+    const meaningful = words.filter((w) => !BACKCHANNEL.has(w) && !echo.has(w));
+    if (meaningful.length >= 2) bargeConfirm("stop");
+  }
+
+  function bargeOnAssistantText(delta) {
+    barge.recentAssistant = (barge.recentAssistant + delta).slice(-300);
   }
 
   function onServerEvent(raw) {
@@ -146,9 +301,13 @@
         break;
       case "session.input_transcript.delta":
         appendTranscript("user", event.delta);
+        bargeOnWords(event.delta);
+        touchActivity();
         break;
       case "session.output_transcript.delta":
         appendTranscript("assistant", event.delta);
+        bargeOnAssistantText(event.delta);
+        touchActivity();
         break;
       case "session.closed":
         stop("Розмову завершено");
@@ -161,49 +320,87 @@
     }
   }
 
+  // Every start() gets a number; a stop() (or a newer start) makes the old one stale, so an
+  // attempt that is still awaiting the mic / backend never touches the new call's state.
+  let attempt = 0;
+  let dropTimer = null;
+  let idleTimer = null;
+  // A forgotten open call keeps billing: end it after this long with nobody speaking.
+  const IDLE_LIMIT_MS = 5 * 60 * 1000;
+
+  function touchActivity() {
+    clearTimeout(idleTimer);
+    if (!pc) return;
+    idleTimer = setTimeout(() => {
+      addLine("system", "Тиша вже 5 хвилин — розмову завершено, щоб не витрачати хвилини.");
+      stop("Розмову завершено");
+    }, IDLE_LIMIT_MS);
+  }
+
   async function start() {
     if (!BACKEND) {
       addLine("system", "Не вказано адресу бекенду (web/config.js або ?backend=…).");
       return;
     }
+    const my = ++attempt;
     $("talk").disabled = true;
     setStatus("Підключаюсь…", "busy");
     try {
-      mic = await navigator.mediaDevices.getUserMedia({
+      const stream = await navigator.mediaDevices.getUserMedia({
         // Browser echo cancellation keeps the agent from hearing (and interrupting) itself.
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       });
-      pc = new RTCPeerConnection();
-      pc.ontrack = (e) => { $("remote").srcObject = e.streams[0]; };
-      pc.onconnectionstatechange = () => {
-        if (pc && ["failed", "disconnected"].includes(pc.connectionState)) stop("З'єднання втрачено");
+      if (my !== attempt) { stream.getTracks().forEach((t) => t.stop()); return; }
+      mic = stream;
+      const peer = new RTCPeerConnection();
+      pc = peer;
+      peer.ontrack = (e) => {
+        $("remote").srcObject = e.streams[0];
+        if (gate) gate.listenTo(e.streams[0]);
       };
-      gate = createNoiseGate(mic);
-      if (gate) pc.addTrack(gate.track, mic);
-      else mic.getTracks().forEach((track) => pc.addTrack(track, mic));
-      channel = pc.createDataChannel("oai-events");
-      channel.onmessage = (e) => onServerEvent(e.data);
+      peer.onconnectionstatechange = () => {
+        if (pc !== peer) return;
+        const state = peer.connectionState;
+        clearTimeout(dropTimer);
+        if (state === "failed") stop("З'єднання втрачено", "err");
+        // "disconnected" is often a network blip that recovers by itself (Wi-Fi switch etc.).
+        else if (state === "disconnected") {
+          setStatus("Зв'язок перервався — відновлюю…", "busy");
+          dropTimer = setTimeout(() => { if (pc === peer) stop("З'єднання втрачено", "err"); }, 8000);
+        } else if (state === "connected") setStatus("Слухаю — говоріть", "live");
+      };
+      const newGate = await createNoiseGate(mic, onGateSignal);
+      if (my !== attempt) { if (newGate) newGate.close(); return; }
+      gate = newGate;
+      if (gate) peer.addTrack(gate.track, mic);
+      else mic.getTracks().forEach((track) => peer.addTrack(track, mic));
+      channel = peer.createDataChannel("oai-events");
+      channel.onmessage = (e) => { if (pc === peer) onServerEvent(e.data); };
 
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
+      const offer = await peer.createOffer();
+      await peer.setLocalDescription(offer);
       const res = await fetch(BACKEND + "/api/session", {
         method: "POST",
         headers: headers(),
         body: JSON.stringify({ sdp: offer.sdp }),
       });
+      if (my !== attempt) return;
       if (res.status === 401) {
         showGate();
         throw new Error("Потрібен код доступу");
       }
       if (!res.ok) throw new Error("Сервер відповів " + res.status);
       const { sdp } = await res.json();
-      await pc.setRemoteDescription({ type: "answer", sdp });
+      if (my !== attempt) return;
+      await peer.setRemoteDescription({ type: "answer", sdp });
       setStatus("З'єднуюсь…", "busy");
       $("talk").textContent = "Завершити";
       $("talk").classList.remove("primary");
       $("talk").classList.add("danger");
       $("talk").disabled = false;
+      touchActivity();
     } catch (err) {
+      if (my !== attempt) return;
       const msg = err && err.name === "NotAllowedError" ? "Немає доступу до мікрофона" : (err.message || String(err));
       addLine("system", msg);
       stop("Не вдалося підключитись", "err");
@@ -211,13 +408,17 @@
   }
 
   function stop(text = "Не підключено", state = "") {
+    attempt += 1;
+    clearTimeout(dropTimer);
+    clearTimeout(idleTimer);
     try { if (channel && channel.readyState === "open") channel.send(JSON.stringify({ type: "session.close" })); } catch { /* ignore */ }
     if (pc) { pc.close(); pc = null; }
     if (gate) { gate.close(); gate = null; }
     if (mic) { mic.getTracks().forEach((t) => t.stop()); mic = null; }
     channel = null;
-    assistantSpeaking = false;
     closeBubbles();
+    bargeReset();
+    barge.recentAssistant = "";
     setStatus(text, state);
     $("talk").textContent = "Почати розмову";
     $("talk").classList.add("primary");
@@ -298,16 +499,46 @@
     window.addEventListener("message", (e) => {
       if (e.data && e.data.type === "google-login") refreshGoogle();
     });
+    // Closing or leaving the tab ends the paid Live session instead of leaving it open.
+    window.addEventListener("pagehide", () => { if (pc) stop(); });
     if (!BACKEND) { addLine("system", "Не вказано адресу бекенду."); return; }
-    try {
-      const res = await fetch(BACKEND + "/api/config");
-      const cfg = await res.json();
+    const cfg = await wakeBackend();
+    if (cfg) {
       if (cfg.access_code_required && !accessCode) showGate();
       if (!cfg.google_login) $("googleConnect").disabled = true;
-    } catch {
-      addLine("system", "Бекенд не відповідає. На безкоштовному Render він «прокидається» до хвилини — оновіть сторінку трохи згодом.");
+      refreshGoogle();
     }
-    refreshGoogle();
+    // Free Render sleeps after ~15 min without requests and forgets everyone's Google login;
+    // while the page is open and visible, keep it awake.
+    setInterval(() => {
+      if (document.visibilityState === "visible") fetch(BACKEND + "/healthz").catch(() => {});
+    }, 10 * 60 * 1000);
+  }
+
+  // A sleeping free-tier backend takes up to a minute to start: wait for it instead of failing.
+  async function wakeBackend() {
+    const deadline = Date.now() + 90 * 1000;
+    let notified = false;
+    while (Date.now() < deadline) {
+      try {
+        const res = await fetch(BACKEND + "/api/config");
+        if (res.ok) {
+          if (notified) setStatus("Не підключено");
+          $("talk").disabled = false;
+          return await res.json();
+        }
+      } catch { /* still waking up */ }
+      if (!notified) {
+        notified = true;
+        $("talk").disabled = true;
+        setStatus("Сервер прокидається — до хвилини…", "busy");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    }
+    $("talk").disabled = false;
+    setStatus("Сервер не відповідає", "err");
+    addLine("system", "Бекенд не відповідає. Оновіть сторінку трохи згодом.");
+    return null;
   }
 
   init();

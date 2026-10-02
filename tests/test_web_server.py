@@ -76,3 +76,100 @@ def test_cancelled_google_login_page(client):
     page = client.get("/auth/google/callback?error=access_denied")
     assert page.status_code == 400
     assert "google-login" in page.text
+
+
+class _FakeSideband:
+    """Stands in for client.live.sideband.connect(): stays open until session.close()."""
+
+    def __init__(self) -> None:
+        self.closed = asyncio.Event()
+        self.close_calls = 0
+        outer = self
+
+        class _Session:
+            async def close(self) -> None:
+                outer.close_calls += 1
+                outer.closed.set()
+
+        self.session = _Session()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        return None
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        await self.closed.wait()
+        raise StopAsyncIteration
+
+
+class _FakeLiveClient:
+    def __init__(self) -> None:
+        self.connections: list[_FakeSideband] = []
+        outer = self
+
+        class _Sideband:
+            def connect(self, *, session_id: str) -> _FakeSideband:
+                conn = _FakeSideband()
+                outer.connections.append(conn)
+                return conn
+
+        class _Live:
+            sideband = _Sideband()
+
+        self.live = _Live()
+
+
+def test_forgotten_call_is_closed_after_the_time_limit():
+    from server.live_bridge import SidebandToolBridge
+
+    fake = _FakeLiveClient()
+    closed: list[object] = []
+    bridge = SidebandToolBridge(
+        client=fake,  # type: ignore[arg-type]
+        session_id="sess-1",
+        executor=None,  # type: ignore[arg-type]
+        on_closed=closed.append,
+        max_duration_s=0.05,
+    )
+    asyncio.run(asyncio.wait_for(bridge.run(), timeout=2))
+    assert fake.connections[0].close_calls == 1
+    assert closed == [bridge]
+    assert not bridge.is_open
+
+
+def test_new_call_closes_the_previous_one_of_the_same_browser(client, monkeypatch):
+    class _Old:
+        closed = False
+
+        async def close(self) -> None:
+            _Old.closed = True
+
+    class _Created:
+        class session:  # noqa: N801
+            id = "sess-new"
+
+        class transport:  # noqa: N801
+            sdp = "answer"
+
+    async def fake_create(**_kwargs):
+        return _Created
+
+    started: list[object] = []
+    monkeypatch.setattr(web.openai_client.live, "create", fake_create)
+    monkeypatch.setattr(web.SidebandToolBridge, "run", lambda self: asyncio.sleep(0, started.append(self)))
+    user = web.users.get(ALICE)
+    old = _Old()
+    user.bridges.add(old)
+
+    res = client.post("/api/session", json={"sdp": "offer"}, headers={"X-Client-Id": ALICE})
+    assert res.status_code == 200
+    assert res.json()["sdp"] == "answer"
+    assert _Old.closed
+    user.bridges.discard(old)
+    assert [b.session_id for b in user.bridges] == ["sess-new"]
+    user.bridges.clear()

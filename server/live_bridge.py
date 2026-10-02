@@ -36,11 +36,13 @@ class SidebandToolBridge:
         session_id: str,
         executor: ToolExecutor,
         on_closed: Callable[[SidebandToolBridge], None] | None = None,
+        max_duration_s: float | None = None,
     ) -> None:
         self._client = client
         self.session_id = session_id
         self._executor = executor
         self._on_closed = on_closed
+        self._max_duration_s = max_duration_s
         self._connection: Any = None
         self._closed = asyncio.Event()
         self._tool_tasks: set[asyncio.Task] = set()
@@ -50,10 +52,13 @@ class SidebandToolBridge:
         self.end_requested = False
 
     async def run(self) -> None:
+        expiry: asyncio.Task | None = None
         try:
             async with self._client.live.sideband.connect(session_id=self.session_id) as connection:
                 self._connection = connection
                 logger.info("web.sideband.connected session_id=%s", self.session_id)
+                if self._max_duration_s:
+                    expiry = asyncio.create_task(self._expire_after(self._max_duration_s))
                 async for event in connection:
                     await self._handle_event(event)
                     if _attr(event, "type") == "session.closed":
@@ -63,6 +68,8 @@ class SidebandToolBridge:
         finally:
             self._closed.set()
             self._connection = None
+            if expiry is not None:
+                expiry.cancel()
             for task in list(self._tool_tasks):
                 task.cancel()
             logger.info("web.sideband.closed session_id=%s", self.session_id)
@@ -80,6 +87,12 @@ class SidebandToolBridge:
         await self._connection.session.commentary.append(
             content=text, delegation_id=None, event_id=f"comment_{uuid.uuid4().hex[:8]}"
         )
+
+    async def _expire_after(self, seconds: float) -> None:
+        """Cost cap: a call nobody ended (tab left open, browser crashed) is closed server-side."""
+        await asyncio.sleep(seconds)
+        logger.info("web.session.expired session_id=%s after_s=%s", self.session_id, int(seconds))
+        await self.close()
 
     async def close(self) -> None:
         if self.is_open:

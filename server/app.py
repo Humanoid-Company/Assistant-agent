@@ -52,6 +52,8 @@ logger = logging.getLogger("server")
 PUBLIC_BACKEND_URL = os.getenv("PUBLIC_BACKEND_URL", "http://localhost:8000").rstrip("/")
 FRONTEND_ORIGINS = [o.strip().rstrip("/") for o in os.getenv("FRONTEND_ORIGINS", "*").split(",") if o.strip()]
 ACCESS_CODE = os.getenv("ACCESS_CODE", "").strip()
+# Hard cap on one call's length (cost guard); the page also ends a call after 5 min of silence.
+MAX_SESSION_S = float(os.getenv("MAX_SESSION_MINUTES", "30")) * 60
 
 _WEB_NOTE = (
     "\nWeb demo: you run in a browser tab for the team to try. To connect Google the person "
@@ -141,11 +143,19 @@ async def create_session(
         logger.exception("web.session.create_failed")
         raise HTTPException(status_code=502, detail=f"live_create_failed: {type(exc).__name__}") from exc
     session_id = result.session.id
+    # One call per browser: an older session (another tab, a page reload) would keep billing
+    # and run tools against the same account in parallel.
+    for old in list(user.bridges):
+        try:
+            await old.close()
+        except Exception:
+            logger.debug("closing old session failed", exc_info=True)
     bridge = SidebandToolBridge(
         client=openai_client,
         session_id=session_id,
         executor=user.executor,
         on_closed=user.bridges.discard,
+        max_duration_s=MAX_SESSION_S,
     )
     user.bridges.add(bridge)
     task = asyncio.create_task(bridge.run())
