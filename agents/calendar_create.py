@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 from agents.calendar_speech import (
     _CHOICE_TITLE_RE,
     _is_acknowledgement,
+    _mentioned_dates,
     _mentioned_times,
 )
 from agents.calendar_validation import (
@@ -169,6 +170,7 @@ class CalendarCreateMixin:
             found.add(self._now().strftime("%Y-%m-%d"))
         for match in re.finditer(r"\d{4}-\d{2}-\d{2}", text):
             found.add(match.group(0))
+        found |= _mentioned_dates(text, self._now())
         return found
 
     def _ground_create(

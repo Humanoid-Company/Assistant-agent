@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from agents.create_draft import (
     is_acknowledgement,
@@ -252,6 +252,145 @@ def _mentioned_times(text: str) -> set[str]:
         found.add(f"{hour:02d}:00")
         if period is None and 1 <= hour <= 11:
             found.add(f"{hour + 12:02d}:00")
+    return found
+
+
+# Spoken dates: «13 жовтня», «тринадцяте жовтня дві тисячі двадцять шостого року»,
+# «дванадцятого десятого двадцять шостого», «13.10.2026», «в понеділок».
+_MONTH_STEMS: tuple[tuple[str, int], ...] = (
+    ("січ", 1), ("январ", 1), ("лют", 2), ("феврал", 2), ("берез", 3), ("март", 3),
+    ("квіт", 4), ("апрел", 4), ("травн", 5), ("трав", 5), ("ма", 5), ("черв", 6), ("июн", 6),
+    ("лип", 7), ("июл", 7), ("серп", 8), ("август", 8), ("верес", 9), ("сентябр", 9),
+    ("жовт", 10), ("октябр", 10), ("листопад", 11), ("ноябр", 11), ("груд", 12), ("декабр", 12),
+)
+# Longest stems first: «тринадцят» before «три», «двадцят» before «два».
+_NUMBER_STEMS: tuple[tuple[str, int], ...] = (
+    ("одинадцят", 11), ("одиннадцат", 11), ("дванадцят", 12), ("двенадцат", 12),
+    ("тринадцят", 13), ("тринадцат", 13), ("чотирнадцят", 14), ("четырнадцат", 14),
+    ("п'ятнадцят", 15), ("пятнадцят", 15), ("пятнадцат", 15), ("шістнадцят", 16),
+    ("шестнадцат", 16), ("сімнадцят", 17), ("семнадцат", 17), ("вісімнадцят", 18),
+    ("восемнадцат", 18), ("дев'ятнадцят", 19), ("девятнадцат", 19), ("двадцят", 20),
+    ("двадцат", 20), ("тридцят", 30), ("тридцат", 30), ("десят", 10),
+    ("перш", 1), ("перв", 1), ("один", 1), ("друг", 2), ("втор", 2), ("два", 2), ("дві", 2),
+    ("трет", 3), ("три", 3), ("четверт", 4), ("чотир", 4), ("четыр", 4), ("п'ят", 5),
+    ("пят", 5), ("шост", 6), ("шіст", 6), ("шест", 6), ("сьом", 7), ("седьм", 7), ("сім", 7),
+    ("сем", 7), ("восьм", 8), ("вісім", 8), ("восем", 8), ("дев'ят", 9), ("девят", 9),
+)
+_WEEKDAYS: dict[str, int] = {
+    "понеділок": 0, "понеділка": 0, "понедельник": 0, "вівторок": 1, "вівторка": 1,
+    "вторник": 1, "середа": 2, "середу": 2, "середи": 2, "среда": 2, "среду": 2,
+    "четвер": 3, "четверга": 3, "четверг": 3, "п'ятниця": 4, "п'ятницю": 4, "п'ятниці": 4,
+    "пятниця": 4, "пятницю": 4, "пятница": 4, "пятницу": 4, "субота": 5, "суботу": 5,
+    "суботи": 5, "суббота": 5, "субботу": 5, "неділя": 6, "неділю": 6, "неділі": 6,
+    "воскресенье": 6,
+}
+_YEAR_WORDS = ("року", "рік", "году", "год", "р")
+_THOUSAND_WORDS = ("тисячі", "тисяча", "тысячи", "тысяча")
+_TOKEN_RE = re.compile(r"\d+|[a-zа-яіїєґё']+")
+_NUMERIC_DATE_RE = re.compile(r"(?<![\d:])(\d{1,2})[./](\d{1,2})(?:[./](\d{4}|\d{2}))?(?![\d:])")
+
+
+def _fold(text: str) -> str:
+    folded = re.sub(r"[ʼ’`]", "'", text.casefold())
+    return re.sub(r"(\d)-?(?:ого|го|те|ге|е|й|а)\b", r"\1", folded)  # «13-го» → «13»
+
+
+def _stem_value(token: str, stems: tuple[tuple[str, int], ...], max_tail: int = 4) -> int | None:
+    for stem, value in stems:
+        if token.startswith(stem) and len(token) - len(stem) <= max_tail:
+            return value
+    return None
+
+
+def _number_at(tokens: list[str], i: int) -> tuple[int, int] | None:
+    """Number 1–39 said in digits or words (cardinal/ordinal) at tokens[i] → (value, next index)."""
+    if i >= len(tokens):
+        return None
+    token = tokens[i]
+    if token.isdigit():
+        return (int(token), i + 1) if len(token) <= 2 else None
+    value = _stem_value(token, _NUMBER_STEMS)
+    if value is None:
+        return None
+    if value in (20, 30) and i + 1 < len(tokens):
+        unit = _stem_value(tokens[i + 1], _NUMBER_STEMS)
+        if unit is not None and 1 <= unit <= 9:
+            return value + unit, i + 2
+    return value, i + 1
+
+
+def _year_at(tokens: list[str], i: int, *, bare_ok: bool) -> int | None:
+    """«2026», «дві тисячі двадцять шостого», «двадцять шостого року» (bare «двадцять шостого»
+    only right after a numeric month)."""
+    if i >= len(tokens):
+        return None
+    token = tokens[i]
+    if token.isdigit() and len(token) == 4:
+        return int(token)
+    if token in ("дві", "две") and i + 1 < len(tokens) and tokens[i + 1] in _THOUSAND_WORDS:
+        number = _number_at(tokens, i + 2)
+        return 2000 + number[0] if number else None
+    number = _number_at(tokens, i)
+    if number is None or not 20 <= number[0] <= 39:
+        return None
+    said_year = number[1] < len(tokens) and tokens[number[1]] in _YEAR_WORDS
+    return 2000 + number[0] if said_year or bare_ok else None
+
+
+def _calendar_date(year: int | None, month: int, day: int, now: datetime) -> str | None:
+    """No year → the next such day from today."""
+    try:
+        if year is not None:
+            return datetime(year, month, day).strftime("%Y-%m-%d")
+        found = datetime(now.year, month, day)
+        if found.date() < now.date():
+            found = datetime(now.year + 1, month, day)
+        return found.strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def _mentioned_dates(text: str, now: datetime) -> set[str]:
+    found: set[str] = set()
+    folded = _fold(text)
+    for match in _NUMERIC_DATE_RE.finditer(folded):
+        year = match.group(3)
+        if year and len(year) == 2:
+            year = "20" + year
+        day = _calendar_date(int(year) if year else None, int(match.group(2)), int(match.group(1)), now)
+        if day:
+            found.add(day)
+    tokens = _TOKEN_RE.findall(_NUMERIC_DATE_RE.sub(" ", folded))
+    for i in range(len(tokens)):
+        weekday = _WEEKDAYS.get(tokens[i])
+        if weekday is not None:
+            ahead = (weekday - now.weekday()) % 7 or 7
+            found.add((now + timedelta(days=ahead)).strftime("%Y-%m-%d"))
+            continue
+        number = _number_at(tokens, i)
+        if number is None or not 1 <= number[0] <= 31:
+            continue
+        day, j = number
+        if j >= len(tokens):
+            continue
+        month = _stem_value(tokens[j], _MONTH_STEMS, max_tail=5)
+        if month == 5 and not tokens[j].startswith(("трав", "мая", "мае")):
+            month = None
+        bare_year = False
+        if month is not None:
+            j += 1
+        elif tokens[i].endswith("ого") and tokens[j].endswith("ого"):
+            # «дванадцятого десятого (двадцять шостого)» — the month said as a number.
+            spoken_month = _number_at(tokens, j)
+            if spoken_month is None or not 1 <= spoken_month[0] <= 12:
+                continue
+            month, j = spoken_month
+            bare_year = True
+        else:
+            continue
+        day_iso = _calendar_date(_year_at(tokens, j, bare_ok=bare_year), month, day, now)
+        if day_iso:
+            found.add(day_iso)
     return found
 
 
