@@ -341,6 +341,13 @@ def _year_at(tokens: list[str], i: int, *, bare_ok: bool) -> int | None:
     return 2000 + number[0] if said_year or bare_ok else None
 
 
+def _month_word(token: str) -> int | None:
+    month = _stem_value(token, _MONTH_STEMS, max_tail=5)
+    if month == 5 and not token.startswith(("трав", "мая", "мае")):
+        return None  # «ма» alone would catch «мама», «має»…
+    return month
+
+
 def _calendar_date(year: int | None, month: int, day: int, now: datetime) -> str | None:
     """No year → the next such day from today."""
     try:
@@ -377,9 +384,7 @@ def _mentioned_dates(text: str, now: datetime) -> set[str]:
         day, j = number
         if j >= len(tokens):
             continue
-        month = _stem_value(tokens[j], _MONTH_STEMS, max_tail=5)
-        if month == 5 and not tokens[j].startswith(("трав", "мая", "мае")):
-            month = None
+        month = _month_word(tokens[j])
         bare_year = False
         if month is not None:
             j += 1
@@ -396,6 +401,51 @@ def _mentioned_dates(text: str, now: datetime) -> set[str]:
         if day_iso:
             found.add(day_iso)
     return found
+
+
+# Words of a calendar question that are not part of an event title («які в мене плани»).
+_QUERY_FILLER = frozenset({
+    "що", "які", "який", "яка", "яке", "коли", "котрій", "котру", "чи", "є", "мене", "мені", "мій", "моя", "мої", "там",
+    "тут", "плани", "планів", "план", "справи", "справ", "заплановано", "запланованого",
+    "розклад", "розкладі", "календарі", "календар", "подій", "події", "подія", "подію", "все",
+    "всі", "усі", "глянь", "глянути", "подивись", "подивитись", "покажи", "скажи", "розкажи",
+    "можеш", "можна", "а", "ну", "чуєш", "слухай", "маю", "року", "рік", "тиждень", "тижня",
+    "тижні", "наступного", "наступний", "наступному", "цей", "цього", "цьому", "вихідні",
+    "вихідних", "годині", "годину", "година", "нуль", "ноль", "вечора", "ранку", "дня", "ночі",
+})
+
+
+def _strip_query_words(title: str) -> str:
+    """Keep only words that can be part of an event's name: no question words, dates, hours."""
+    kept = []
+    for word in title.split():
+        token = _fold(word).strip(".,!?;:«»\"")
+        if (
+            not token
+            or token in _QUERY_FILLER
+            or token.isdigit()
+            or token in _WEEKDAYS
+            or _month_word(token) is not None
+            or _stem_value(token, _NUMBER_STEMS, max_tail=3) is not None
+        ):
+            continue
+        kept.append(word)
+    return " ".join(kept)
+
+
+def _week_window(text: str, now: datetime) -> tuple[datetime, datetime] | None:
+    """«цей тиждень» → now…Monday, «наступного тижня» → next Mon…Mon, «вихідні» → Sat…Mon."""
+    folded = _fold(text)
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    next_monday = midnight + timedelta(days=7 - now.weekday())
+    if re.search(r"вихідн", folded):
+        saturday = midnight + timedelta(days=max(0, 5 - now.weekday()))
+        return max(saturday, now), next_monday
+    if re.search(r"тижн|тижд", folded):
+        if re.search(r"наступн", folded):
+            return next_monday, next_monday + timedelta(days=7)
+        return now, next_monday
+    return None
 
 
 def _is_acknowledgement(text: str) -> bool:

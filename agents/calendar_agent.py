@@ -19,7 +19,12 @@ from agents.calendar_events import (
     _timed_bounds,
 )
 from agents.calendar_execution import CalendarExecutionMixin
-from agents.calendar_speech import _mentioned_times  # noqa: F401  (re-export for tests)
+from agents.calendar_speech import (
+    _mentioned_dates,
+    _mentioned_times,  # noqa: F401  (re-export for tests)
+    _strip_query_words,
+    _week_window,
+)
 from agents.calendar_validation import (
     _NO,
     _PRIMARY,
@@ -222,7 +227,9 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
             )
         try:
             if action in ("list", "view", "agenda"):
-                return self.list_upcoming(query=kwargs["query"], session_id=kwargs["session_id"])
+                return self.list_upcoming(
+                    query=kwargs["query"], session_id=kwargs["session_id"], date=kwargs["date"]
+                )
             if action == "search":
                 return self.search(
                     kwargs["query"] or kwargs["title"] or "",
@@ -366,25 +373,54 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
             return None
         return found
 
+    def _read_query(
+        self, query: str | None, now: datetime
+    ) -> tuple[str, str | None, str | None, tuple[datetime, datetime] | None]:
+        """«які в мене завтра плани» → no title filter + tomorrow. Question words, spoken dates
+        («3 жовтня», «на суботу») and week ranges never end up as an event-name filter."""
+        title, parsed_date, parsed_time = parse_search_criteria(query, now=now, timezone=self._timezone)
+        window = None
+        if parsed_date is None and query:
+            window = _week_window(query, now)
+            if window is None:
+                spoken = _mentioned_dates(query, now)
+                if len(spoken) == 1:
+                    parsed_date = next(iter(spoken))
+        return _strip_query_words(title), parsed_date, parsed_time, window
+
+    def _day_of(self, value: str | None, now: datetime) -> str | None:
+        """A date the model passed — ISO, «завтра» or «3 жовтня» → YYYY-MM-DD, else None."""
+        text = _blank(value)
+        if text is None:
+            return None
+        iso = relative_or_iso_date(text, now=now, timezone=self._timezone)
+        if iso:
+            return iso
+        spoken = _mentioned_dates(text, now)
+        return next(iter(spoken)) if len(spoken) == 1 else None
+
     def list_upcoming(
         self,
         query: str | None = None,
         days: int = 7,
         session_id: str | None = None,
+        date: str | None = None,
     ) -> AgentResult:
         sub, client = self._client_for_user()
-        now = datetime.now(ZoneInfo(self._timezone))
-        title, parsed_date, parsed_time = parse_search_criteria(query, now=now, timezone=self._timezone)
+        now = self._now()
+        title, parsed_date, parsed_time, window = self._read_query(query, now)
+        day = self._day_of(date, now) or parsed_date
         events = self._collect(
             client,
             title=title,
-            date=parsed_date,
+            date=day,
             time=parsed_time,
             now=now,
-            future_only=parsed_date is None,
+            future_only=day is None,
             horizon_days=days,
+            window=None if day else window,
         )
-        return self._events_result(sub, session_id, events, search_mode=bool(query))
+        return self._events_result(sub, session_id, events, search_mode=bool(title))
 
     def search(
         self,
@@ -397,16 +433,18 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
         if not (query or "").strip() and not date and not time:
             return AgentResult("needs_more_info", "Що саме шукати в календарі?")
         sub, client = self._client_for_user()
-        now = datetime.now(ZoneInfo(self._timezone))
-        title, parsed_date, parsed_time = parse_search_criteria(query, now=now, timezone=self._timezone)
+        now = self._now()
+        title, parsed_date, parsed_time, window = self._read_query(query, now)
+        day = self._day_of(date, now) or parsed_date
         events = self._collect(
             client,
             title=title,
-            date=date or parsed_date,
+            date=day,
             time=time or parsed_time,
             now=now,
             future_only=False,
             horizon_days=30,
+            window=None if day else window,
         )
         return self._events_result(sub, session_id, events, search_mode=True)
 

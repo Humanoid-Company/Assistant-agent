@@ -534,9 +534,12 @@ class CalendarEditMixin:
         now: datetime,
         future_only: bool,
         horizon_days: int,
+        window: tuple[datetime, datetime] | None = None,
     ) -> list[dict]:
         zone = ZoneInfo(self._timezone)
-        if date:
+        if window:
+            time_min, time_max = window
+        elif date:
             day = datetime.fromisoformat(f"{date}T00:00:00").replace(tzinfo=zone)
             time_min = day
             time_max = day + timedelta(days=1)
