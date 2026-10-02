@@ -428,10 +428,19 @@ class CalendarCreateMixin:
 
         idempotency_key = str(uuid.uuid4())
         when = f"{speak_date(date, now=self._now())} о {speak_clock(time)}"
-        summary = (
-            f"Створити подію «{title}» на {when}"
-            f"{' з Google Meet' if with_meet else ''}. Підтвердити?"
-        )
+        overlaps = self._overlapping(start, end)
+        if overlaps:
+            # The user decides: keep both, or pick another time. Never move the other event.
+            summary = (
+                f"{self._overlap_phrase(overlaps)} Все одно створити «{title}» на {when}"
+                f"{' з Google Meet' if with_meet else ''}, чи обрати інший час? "
+                "Наявну подію не змінюю."
+            )
+        else:
+            summary = (
+                f"Створити подію «{title}» на {when}"
+                f"{' з Google Meet' if with_meet else ''}. Підтвердити?"
+            )
         op = self._pending.put(
             sub,
             "calendar_create",
@@ -451,9 +460,8 @@ class CalendarCreateMixin:
             },
             session_id=session_id,
         )
-        return AgentResult(
-            "confirmation_required",
-            summary,
-            {"op_id": op.op_id, "kind": op.kind},
-        )
+        data: dict = {"op_id": op.op_id, "kind": op.kind}
+        if overlaps:
+            data["overlapping_events"] = [self._public_event(event) for event in overlaps]
+        return AgentResult("confirmation_required", summary, data)
 

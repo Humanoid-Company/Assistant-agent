@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from agents.calendar_create import CalendarCreateMixin
@@ -16,6 +16,7 @@ from agents.calendar_events import (
     _is_past,
     _is_recurring,
     _local_parts,
+    _timed_bounds,
 )
 from agents.calendar_execution import CalendarExecutionMixin
 from agents.calendar_speech import _mentioned_times  # noqa: F401  (re-export for tests)
@@ -448,6 +449,40 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
         else:
             message = "Ось найближчі події: " + "; ".join(lines)
         return AgentResult("success", message, {"events": public})
+
+    def _overlapping(
+        self, start: datetime, end: datetime, *, exclude_ids: tuple[str, ...] = ()
+    ) -> list[dict]:
+        """Timed events that overlap [start, end). All-day events don't block a time slot.
+        A failed lookup never blocks the action — the check is a courtesy, not a gate."""
+        try:
+            _sub, client = self._client_for_user()
+            # Look back a day so a long event that started earlier is caught too.
+            events = client.list_events(start - timedelta(days=1), end)
+        except (OAuthError, GoogleApiError):
+            logger.warning("calendar overlap check failed", exc_info=True)
+            return []
+        found = []
+        for event in events:
+            if event.get("id") in exclude_ids or event.get("recurringEventId") in exclude_ids:
+                continue
+            bounds = _timed_bounds(event)
+            if bounds and bounds[0] < end and bounds[1] > start:
+                found.append(event)
+        return found
+
+    def _overlap_phrase(self, events: list[dict]) -> str:
+        """«На цей час уже є «Бізнес» з 15:00 до 16:00.»"""
+        zone = ZoneInfo(self._timezone)
+        parts = []
+        for event in events[:3]:
+            begin, finish = _timed_bounds(event)  # type: ignore[misc]
+            parts.append(
+                f"«{event.get('summary') or '(без назви)'}» з {begin.astimezone(zone):%H:%M} "
+                f"до {finish.astimezone(zone):%H:%M}"
+            )
+        more = f" і ще {len(events) - 3}" if len(events) > 3 else ""
+        return "На цей час уже є " + ", ".join(parts) + more + "."
 
     def _clock(self, event: dict) -> str | None:
         parts = _local_parts(event, self._timezone)

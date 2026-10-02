@@ -8,6 +8,7 @@ from agents.calendar_events import (
     _is_recurring,
     _local_parts,
     _mutation_id,
+    _parse_instant,
     _scope,
     _snapshot,
     _timed_bounds,
@@ -247,6 +248,14 @@ class CalendarEditMixin:
         if isinstance(planned, AgentResult):
             return planned
         target_id = _mutation_id(event, scope)
+        overlaps = self._edit_overlaps(planned["patch"], event, target_id)
+        if overlaps:
+            # The user decides: keep both, or pick another time. Never move the other event.
+            planned["summary_uk"] = (
+                f"{self._overlap_phrase(overlaps)} "
+                + planned["summary_uk"].removesuffix(" Підтверджуєш?")
+                + " Все одно так зробити, чи обрати інший час? Ту подію не змінюю."
+            )
         original_event = event
         if target_id != event.get("id"):
             _sub, client = self._client_for_user()
@@ -270,16 +279,29 @@ class CalendarEditMixin:
             },
             session_id=session_id,
         )
-        return AgentResult(
-            "confirmation_required",
-            planned["summary_uk"],
-            {
-                "op_id": op.op_id,
-                "event_id": target_id,
-                "kind": planned["kind"],
-                "calendar_id": _PRIMARY,
-            },
-        )
+        data: dict = {
+            "op_id": op.op_id,
+            "event_id": target_id,
+            "kind": planned["kind"],
+            "calendar_id": _PRIMARY,
+        }
+        if overlaps:
+            data["overlapping_events"] = [self._public_event(item) for item in overlaps]
+        return AgentResult("confirmation_required", planned["summary_uk"], data)
+
+    def _edit_overlaps(self, patch: dict, event: dict, target_id: str) -> list[dict]:
+        """Events the edited one would overlap at its new time (only when its time changes)."""
+        if "start" not in patch and "end" not in patch:
+            return []
+        bounds = _timed_bounds(event)
+        start_raw = (patch.get("start") or {}).get("dateTime")
+        end_raw = (patch.get("end") or {}).get("dateTime")
+        if bounds is None and not (start_raw and end_raw):
+            return []
+        start = _parse_instant(start_raw) if start_raw else bounds[0]  # type: ignore[index]
+        end = _parse_instant(end_raw) if end_raw else bounds[1]  # type: ignore[index]
+        own = tuple(i for i in (event.get("id"), target_id, event.get("recurringEventId")) if i)
+        return self._overlapping(start, end, exclude_ids=own)
 
     def _validate_destination(
         self,

@@ -262,9 +262,10 @@ def test_move_lunch_preserves_duration_and_does_not_create(tmp_path):
     assert "15:00" in preview.message
     assert "підтвердж" in preview.message.lower()
     assert router.pending.get(SUB).kind == "calendar_reschedule"
-    assert cal.list_queries[-1] == "Обід"
-    assert "16:00" not in (cal.list_queries[-1] or "")
-    assert "15:00" not in (cal.list_queries[-1] or "")
+    search = [q for q in cal.list_queries if q][-1]  # the unfiltered list is the overlap check
+    assert search == "Обід"
+    assert "16:00" not in search
+    assert "15:00" not in search
     done = router.calendar_action(action="confirm", confirmation="yes")
     assert done.status == "success"
     assert done.data["event_id"] == eid
