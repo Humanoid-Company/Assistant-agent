@@ -119,26 +119,18 @@ _HOUR_WORDS: dict[str, int] = {
     "двадцяту": 20,
     "двадцатую": 20,
     "двадцять одну": 21,
+    "одну": 1,
     "двадцать один": 21,
     "двадцять дві": 22,
     "двадцать два": 22,
     "двадцять три": 23,
     "двадцать три": 23,
 }
-_WORD_HOUR_RE = re.compile(
-    r"(?:о|в|у|на|о\s*коло)?\s*"
-    r"(нуль|один|одна|перш\w*|два|дві|друг\w*|три|трет\w*|чотири|четверт\w*|"
-    r"п['ʼ]?ят\w*|пять|пят\w*|шість|шесть|шост\w*|шест\w*|сім|семь|сьом\w*|седьм\w*|"
-    r"вісім|восемь|восьм\w*|дев['ʼ]?ят\w*|десят\w*|одинадцят\w*|одиннадцат\w*|"
-    r"дванадцят\w*|двенадцат\w*|тринадцят\w*|тринадцат\w*|чотирнадцят\w*|четырнадцат\w*|"
-    r"п['ʼ]?ятнадцят\w*|пятнадцат\w*|шістнадцят\w*|шестнадцат\w*|сімнадцят\w*|семнадцат\w*|"
-    r"вісімнадцят\w*|восемнадцат\w*|дев['ʼ]?ятнадцят\w*|девятнадцат\w*|"
-    r"двадцят\w*|двадцат\w*(?:\s+(?:один|одна|два|дві|три))?)"
-    r"(?:\s+(?:нуль|ноль)\s+(?:нуль|ноль))?"
-    r"(?:\s*(?:годин\w*|час\w*|часа))?"
-    r"(?:\s*(вечора|вечір|вечера|вечером|дня|днем|ранку|зранку|ночі|ночью))?",
-    re.IGNORECASE,
-)
+# Words, not a regex alternation: «сім|…|сімнадцят» matched «сім» inside «сімнадцяту»
+# (17 → 7), «одинадцяту» became 1/13, «двадцятій» 2/14.
+_WORD_TOKEN_RE = re.compile(r"[a-zа-яіїєґё'ʼ’`-]+", re.IGNORECASE)
+_PERIOD_RE = re.compile(r"^(вечора|вечір|вечера|вечером|дня|днем|ранку|зранку|ночі|ночью)$")
+_ZERO_WORDS = ("нуль", "ноль", "нуль-нуль", "ноль-ноль")
 _SPOKEN_HHMM_RE = re.compile(
     r"\b(\d{1,2})\s+(?:нуль|ноль|00)\s+(?:нуль|ноль|00)\b",
     re.IGNORECASE,
@@ -241,11 +233,23 @@ def _mentioned_times(text: str) -> set[str]:
         hour = int(match.group(1))
         if hour <= 23:
             found.add(f"{hour:02d}:00")
-    for match in _WORD_HOUR_RE.finditer(text):
-        hour = _lookup_hour_word(match.group(1))
+    tokens = _WORD_TOKEN_RE.findall(text.casefold())
+    consumed = 0
+    for i, token in enumerate(tokens):
+        if i < consumed or token in _ZERO_WORDS:
+            continue  # «п'ятнадцята нуль нуль» — minutes, not midnight
+        hour = _lookup_hour_word(token)
         if hour is None:
             continue
-        period = match.group(2)
+        j = i + 1
+        if hour == 20 and j < len(tokens):
+            unit = _lookup_hour_word(tokens[j])
+            if unit is not None and 1 <= unit <= 3:  # «двадцять першій»
+                hour, j = 20 + unit, j + 1
+                consumed = j
+        while j < len(tokens) and (tokens[j] in _ZERO_WORDS or tokens[j].startswith(("годин", "час"))):
+            j += 1
+        period = tokens[j] if j < len(tokens) and _PERIOD_RE.match(tokens[j]) else None
         hour = _hour_period(hour, period)
         if hour > 23:
             continue

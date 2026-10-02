@@ -24,7 +24,7 @@ def client(monkeypatch):
 
 
 def test_health_and_config(client):
-    assert client.get("/healthz").json() == {"ok": True}
+    assert client.get("/healthz").json()["ok"] is True
     assert set(client.get("/api/config").json()) == {"access_code_required", "google_login"}
 
 

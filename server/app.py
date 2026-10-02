@@ -118,7 +118,12 @@ class SessionRequest(BaseModel):
 
 @app.get("/healthz")
 def healthz() -> dict:
-    return {"ok": True}
+    # Render sets these: shows which commit/branch is actually deployed.
+    return {
+        "ok": True,
+        "commit": os.getenv("RENDER_GIT_COMMIT", "")[:7] or None,
+        "branch": os.getenv("RENDER_GIT_BRANCH") or None,
+    }
 
 
 @app.get("/api/config")
