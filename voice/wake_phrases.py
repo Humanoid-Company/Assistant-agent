@@ -1,4 +1,5 @@
-"""«Єва, скажи» (wake) and «Дякую, Єва» (pause) — tolerant matching of STT transcripts.
+"""Waking Єва («Єва, скажи», «Привіт, Єва», «Гей, Єва», …) and pausing her (only «Дякую, Єва»)
+— tolerant matching of STT transcripts.
 
 Speech recognisers write the name many ways («Єва», «Єво», «Ева», «Eva», «є ва») and mangle
 short words («скажі», «кажи», «дякуєм»). The name is matched against an explicit list — fuzzy
@@ -19,8 +20,15 @@ _NAME_FORMS = frozenset({
     "ева", "эва", "эво", "ево", "єфа", "ефа",
     "eva", "evo", "eve", "yeva", "yevo", "jeva",
 })
-_WAKE_VERBS = ("скажи", "кажи", "скажіть", "скажи-но")
-_STOP_VERBS = ("дякую", "дякуємо", "дяки", "спасибі", "спасибо", "thanks", "thank")
+# The name plus one of these wakes her. The name alone does not: talking ABOUT Єва mustn't.
+_WAKE_VERBS = (
+    "скажи", "кажи", "скажіть", "скажи-но",
+    "привіт", "привітик", "вітаю", "гей", "хей", "агов", "алло",
+    "слухай", "послухай", "допоможи", "підкажи", "прокидайся",
+    "hello", "hey",
+)
+# One pause phrase on purpose — «Дякую, Єва»; the variants are only STT spellings of «дякую».
+_STOP_VERBS = ("дякую", "дякуємо")
 _MAX_GAP = 2  # words allowed between the name and the verb («Єва, ну скажи»)
 
 _WORD_RE = re.compile(r"[a-zа-яіїєґё'’-]+")
@@ -61,7 +69,7 @@ def _name_and_verb(words: list[str], verbs: tuple[str, ...]) -> tuple[int, int] 
 
 
 def match_wake(text: str) -> str | None:
-    """«Єва, скажи …» → what was said after the wake phrase ("" if nothing); None if absent."""
+    """«Єва, скажи …» / «Привіт, Єва …» → what was said after the phrase ("" if nothing); None if absent."""
     words = _tokens(text)
     pair = _name_and_verb(words, _WAKE_VERBS)
     if pair is None:
@@ -70,5 +78,5 @@ def match_wake(text: str) -> str | None:
 
 
 def is_stop(text: str) -> bool:
-    """«Дякую, Єва» / «Єво, дякую» / «дякую Єва» in the text."""
+    """«Дякую, Єва» / «Єво, дякую» / «дякую Єва» in the text — the only pause phrase."""
     return _name_and_verb(_tokens(text), _STOP_VERBS) is not None

@@ -130,6 +130,7 @@ class Assistant(RealtimeDriverMixin, LiveDriverMixin):
         # after «Дякую, Єва» starts a new Live session that is seeded with it.
         self._conversation = ConversationLog()
         self._wake_request: str = ""
+        self._wake_phrase: str = ""
 
         # Long-term memory (persists between sessions)
         self._memory: dict = self._load_memory()
@@ -177,7 +178,7 @@ class Assistant(RealtimeDriverMixin, LiveDriverMixin):
         self._running = True
         logger.info("Assistant started. voice_engine=%s", self._voice_engine)
         threading.Thread(target=self._connectivity_watch_loop, daemon=True, name="connectivity-watch").start()
-        self.tts.speak("Єва готова. Скажіть «Єва, скажи», щоб почати.")
+        self.tts.speak("Єва готова. Покличте її: «Єва, скажи» або «Привіт, Єва».")
 
         while self._running:
             try:
@@ -208,6 +209,7 @@ class Assistant(RealtimeDriverMixin, LiveDriverMixin):
         if rest is not None:
             logger.info("Wake phrase heard → AWAKE")
             self._wake_request = rest  # «Єва, скажи, котра година» → the question goes to the model
+            self._wake_phrase = text
             self.state = State.AWAKE
 
     def _run_awake_session(self) -> None:

@@ -40,6 +40,7 @@ class LiveDriverMixin:
     _pending_cutoff: int
     _conversation: ConversationLog
     _wake_request: str
+    _wake_phrase: str
 
     def _run_awake_session_live(self) -> None:
         """GPT-Live path: full duplex + Responses delegation. No manual turn create."""
@@ -83,6 +84,11 @@ class LiveDriverMixin:
                 pass  # a new voice: no announcement, she just listens on with the same memory
             elif wake_request:
                 live.speak_context(f"The user just said to you: «{wake_request}». Answer it.")
+            elif self._wake_phrase:
+                live.speak_context(
+                    f"The user called you: «{self._wake_phrase}». Answer in two or three words, matching it "
+                    "(a greeting back to «привіт», otherwise «Слухаю»), and wait."
+                )
             else:
                 live.speak_context("Слухаю!")
             if alert := self._connectivity_watcher.pop_alert():

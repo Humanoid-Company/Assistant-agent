@@ -201,13 +201,18 @@
     }
   }
 
-  // ── Єва: «Єва, скажи» wakes her, «Дякую, Єва» pauses ───────────────────────────────────────
+  // ── Єва: «Єва, скажи» wakes her (or «Привіт, Єва», «Гей, Єва», …), «Дякую, Єва» pauses ───────
   // Same rules as voice/wake_phrases.py — keep the two in sync (tests/test_eva_phrases.py has the
   // cases). The name is matched against a list (fuzzy matching a 3-letter word would accept
   // «два»), the verbs fuzzily, like Python's difflib ratio ≥ 0.75.
   const EVA_NAME_FORMS = new Set(["єва", "єво", "ева", "эва", "эво", "ево", "єфа", "ефа", "eva", "evo", "eve", "yeva", "yevo", "jeva"]);
-  const EVA_WAKE_VERBS = ["скажи", "кажи", "скажіть", "скажи-но"];
-  const EVA_STOP_VERBS = ["дякую", "дякуємо", "дяки", "спасибі", "спасибо", "thanks", "thank"];
+  const EVA_WAKE_VERBS = [
+    "скажи", "кажи", "скажіть", "скажи-но",
+    "привіт", "привітик", "вітаю", "гей", "хей", "агов", "алло",
+    "слухай", "послухай", "допоможи", "підкажи", "прокидайся",
+    "hello", "hey",
+  ];
+  const EVA_STOP_VERBS = ["дякую", "дякуємо"]; // one pause phrase: «Дякую, Єва»
   const EVA_MAX_GAP = 2;
 
   function evaTokens(text) {
@@ -293,7 +298,7 @@
     $("resume").hidden = eva.mode !== "waiting";
     $("pause").hidden = eva.mode !== "active";
     $("wakeHint").textContent = eva.wakeSupported
-      ? "Скажіть «Єва, скажи», щоб почати, і «Дякую, Єва» — щоб поставити на паузу. Браузер попросить доступ до мікрофона."
+      ? "Покличте Єву — «Єва, скажи», «Привіт, Єва», «Гей, Єва», «Єво, слухай». «Дякую, Єва» — пауза. Браузер попросить доступ до мікрофона."
       : "Цей браузер не вміє слухати «Єва, скажи» (потрібен Chrome, Edge або Safari) — користуйтеся кнопками «Пауза» / «Продовжити». «Дякую, Єва» працює.";
   }
 
@@ -601,7 +606,7 @@
     } else if (opts.say) {
       commentary(opts.say);
     } else if (opts.greet) {
-      greetIfQuiet();
+      greetIfQuiet(opts.heard);
     }
     showState();
     updateButtons();
@@ -662,7 +667,7 @@
     enterPause(true);
   }
 
-  function wakeEva(rest) {
+  function wakeEva(rest, heard = "") {
     if (eva.mode !== "waiting") return;
     clearTimeout(eva.pauseTimer);
     // The model was muted and never heard the phrase: hand it what followed «Єва, скажи».
@@ -672,20 +677,21 @@
       eva.mode = "active";
       sendEvent({ type: "session.input_audio.unmute", event_id: eventId("unmute") });
       setRemoteVolume(1);
-      if (say) commentary(say); else greetIfQuiet();
+      if (say) commentary(say); else greetIfQuiet(heard);
       showState();
       updateButtons();
       touchActivity();
     } else {
-      start({ say, greet: !say }); // the pause closed the call: reopen it with the history
+      start({ say, greet: !say, heard }); // the pause closed the call: reopen it with the history
     }
   }
 
-  function greetIfQuiet() {
+  function greetIfQuiet(heard = "") {
     const wokeAt = Date.now();
+    const phrase = heard || "Єва, скажи";
     setTimeout(() => {
       if (eva.mode === "active" && !barge.speaking && !barge.audible && eva.lastUserAt < wokeAt) {
-        commentary("The user woke you with «Єва, скажи». Say only a very short «Слухаю» and wait.");
+        commentary("The user called you: «" + phrase + "». Answer in two or three words, matching it (a greeting back to «привіт», otherwise «Слухаю» / «Так?»), and wait.");
       }
     }, 1200);
   }
@@ -714,7 +720,7 @@
           // Wake on the final text only: it carries the whole request after «Єва, скажи».
           if (eva.mode === "waiting" && result.isFinal) {
             const rest = matchWake(text);
-            if (rest !== null) { wakeEva(rest); return; }
+            if (rest !== null) { wakeEva(rest, text.trim()); return; }
           }
         }
       }
