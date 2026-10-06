@@ -70,16 +70,16 @@ VOICE_PERSONAS: dict[str, VoicePersona] = {
             "gleam", "Глім",
             "Жіночий, записаний з живого голосу. Світлий, активний і привітний — голос за замовчуванням.",
             True,
-            "A bright, active, friendly woman around thirty. Upbeat and engaged, clear and easy to "
-            "follow, with a light smile in the voice — energetic without being bubbly.",
+            "A bright, friendly woman around thirty with a clear, warm, melodic voice. Engaged "
+            "and attentive, with a light smile in the voice — lively but never bubbly or rushed.",
             _F_SAMPLES,
         ),
         VoicePersona(
             "bossa", "Боса",
             "Жіночий, записаний з живого голосу. Жвавий, емоційний і теплий — з енергією та усмішкою.",
             True,
-            "A lively, expressive, warm woman with plenty of energy and an easy laugh. Animated "
-            "intonation, a quicker pace on small talk, openly happy about good news.",
+            "A warm, expressive woman with a rich, rounded voice and an easy, soft laugh. Melodic "
+            "intonation with gentle ups and downs; genuinely glad about good news without shouting.",
             _F_SAMPLES,
         ),
         VoicePersona(
@@ -128,15 +128,16 @@ VOICE_PERSONAS: dict[str, VoicePersona] = {
             "tempo", "Темпо",
             "Чоловічий, записаний з живого голосу. Активний і енергійний, говорить жваво.",
             False,
-            "An energetic, expressive, upbeat man. Lively pace and animated intonation, openly "
-            "enthusiastic about good news.",
+            "An upbeat, expressive man with a warm, resonant voice. Lively but controlled pace, "
+            "expressive intonation that stays pleasant and relaxed — enthusiastic without shouting.",
             _M_SAMPLES,
         ),
         VoicePersona(
             "verse", "Верс",
             "Чоловічий. Активний і жвавий — за енергією схожий на Глім.",
             False,
-            "An active, lively, friendly man. Bright and engaged, upbeat pace, expressive intonation.",
+            "An active, friendly man with a bright, warm voice. Engaged and positive, a lively "
+            "but unhurried pace, smooth expressive intonation.",
             _M_SAMPLES,
         ),
         VoicePersona(
