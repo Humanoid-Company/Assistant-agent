@@ -213,7 +213,8 @@ def test_voice_picker_lists_five_voices_and_saves_choice(client):
 
     config = web._session_config(web.users.get(ALICE))
     assert config["audio"]["output"]["voice"] == "shimmer"
-    assert "Voice style:" in config["instructions"]
+    assert "Your voice and character (Шиммер)" in config["instructions"]
+    assert "feminine grammatical gender" in config["instructions"]
 
 
 def test_voice_tool_accepts_only_picker_voices():

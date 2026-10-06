@@ -52,6 +52,7 @@ class LiveDriverMixin:
                     language_name=LANGUAGE_OPTIONS.get(self._memory.get("language", "uk"), LANGUAGE_OPTIONS["uk"]),
                     assistant_name=self._memory.get("assistant_name"),
                     today=date.today().isoformat(),
+                    voice=voice,
                 ),
                 mic_read_chunk=mic.read_chunk,
                 backend_instructions=build_backend_prompt(

@@ -127,15 +127,12 @@ def _session_config(user: WebUser) -> dict:
     language = LANGUAGE_OPTIONS.get(user.language, LANGUAGE_OPTIONS["uk"])
     today = date.today().isoformat()
     voice = _user_voice(user)
-    persona = VOICE_PERSONAS.get(voice)
-    style = f"\nVoice style: {persona.style}" if persona else ""
     return {
         "model": OPENAI_LIVE_MODEL,
         "instructions": build_live_prompt(
-            language_name=language, assistant_name=user.assistant_name, today=today
+            language_name=language, assistant_name=user.assistant_name, today=today, voice=voice
         )
-        + _WEB_NOTE
-        + style,
+        + _WEB_NOTE,
         "audio": {"output": {"voice": voice}},
         "delegation": {
             "type": "responses",
