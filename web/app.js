@@ -85,7 +85,9 @@
 
   // Noise gate between the mic and WebRTC: background sounds (typing, TV, people nearby)
   // never reach the model, only speech louder than the room's noise floor does. While the
-  // assistant is audible the bar is higher, so leftover speaker echo doesn't interrupt it.
+  // assistant is audible the bar also sits above its echo in the mic, learned from how loud
+  // that echo really is: high on laptop speakers, near zero in headphones — so a quiet voice
+  // in a headset still gets through.
   // It also hears the assistant's own audio (2nd input) and reports to the page when the
   // user starts/stops talking and when the assistant is audible — that drives barge-in.
   // ?gate=off turns it off. It runs on the audio thread (AudioWorklet), so a background tab,
@@ -104,17 +106,27 @@
         this.near = (options.processorOptions || {}).near || 0.06;
         this.speaking = false; this.nearFrames = 0; this.nearQuietFor = 1;
         this.audible = false; this.outQuietFor = 1;       // assistant playback
+        // Mic level per unit of assistant output level while only the assistant talks. Starts
+        // as "loud speakers" and drops within a second or two when there is no echo (headset).
+        this.echo = 0.5;
       }
       judge(level, outLevel) {
         if (outLevel > 0.01) this.outQuietFor = 0; else this.outQuietFor += 0.02;
         const audible = this.outQuietFor < 0.3;
         if (audible !== this.audible) { this.audible = audible; this.port.postMessage({ audible }); }
-        const threshold = Math.max(audible ? 0.04 : 0.015, this.floor * 4);
+        // 0.006 ≈ quiet speech into a headset mic; the room's noise floor raises the bar.
+        const echoLevel = audible ? outLevel * this.echo * 2.5 : 0;
+        const threshold = Math.max(0.006, this.floor * 4, echoLevel);
+        // Learn the echo while the gate is shut (the user isn't talking over the assistant).
+        if (audible && !this.open && outLevel > 0.01) {
+          const ratio = level / outLevel;
+          this.echo += (ratio - this.echo) * (ratio < this.echo ? 0.1 : 0.03);
+        }
         if (level > threshold) { this.loud += 1; this.quietFor = 0; }
         else { this.quietFor += 0.02; if (level < threshold * 0.6) this.loud = 0; }
         if (!this.open && this.loud >= 2) this.open = true;
         else if (this.open && this.quietFor > 0.45) this.open = false;
-        const nearThreshold = Math.max(audible ? this.near * 1.3 : this.near, this.floor * 8);
+        const nearThreshold = Math.max(audible ? this.near * 1.3 : this.near, this.floor * 8, echoLevel * 1.3);
         if (level > nearThreshold) { this.nearFrames += 1; this.nearQuietFor = 0; }
         else { this.nearQuietFor += 0.02; if (this.nearQuietFor > 0.25) this.nearFrames = 0; }
         // Near voice: ~120 ms of loud frames to start (a click/bang is shorter), 250 ms gap to end.

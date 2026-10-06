@@ -59,35 +59,19 @@ _M_SAMPLES = (
 )
 
 # Voices offered in the picker, in display order (women first). Keyed by the preset voice id,
-# so a stored voice and the change_voice tool argument stay plain voice ids. Coral, shimmer and
-# sage were dropped: in Ukrainian they sounded choppy and synthetic next to the Live voices.
+# so a stored voice and the change_voice tool argument stay plain voice ids. Picked by ear by the
+# team on Ukrainian samples; dropped for sounding robotic or choppy in Ukrainian: coral, shimmer,
+# sage, quartz, delta, vesper, beacon, cinder.
 VOICE_PERSONAS: dict[str, VoicePersona] = {
     p.voice: p
     for p in (
         # ── women ──
         VoicePersona(
-            "marin", "Марина",
-            "Жіночий, теплий і природний. Як уважна подруга, що допомагає зі справами — голос за замовчуванням.",
-            True,
-            "A warm woman in her late twenties who genuinely likes the person she talks to. You smile "
-            "while you speak and it is audible. Relaxed conversational pace; your pitch rises when "
-            "something is nice or surprising and softens when you reassure.",
-            _F_SAMPLES,
-        ),
-        VoicePersona(
             "gleam", "Глім",
-            "Жіночий, записаний з живого голосу. Світлий, привітний і впевнений — універсальна помічниця.",
+            "Жіночий, записаний з живого голосу. Світлий, активний і привітний — голос за замовчуванням.",
             True,
-            "A bright, friendly, self-assured woman around thirty. Clear and easy to follow, upbeat "
-            "without being bubbly, with a light smile in the voice.",
-            _F_SAMPLES,
-        ),
-        VoicePersona(
-            "willow", "Віллоу",
-            "Жіночий, записаний з живого голосу. М'який, мелодійний і спокійний — для неспішних розмов.",
-            True,
-            "A gentle, melodic woman with a soft, calm voice. Unhurried and soothing, speaking in a "
-            "smooth continuous flow, warm and reassuring.",
+            "A bright, active, friendly woman around thirty. Upbeat and engaged, clear and easy to "
+            "follow, with a light smile in the voice — energetic without being bubbly.",
             _F_SAMPLES,
         ),
         VoicePersona(
@@ -99,52 +83,29 @@ VOICE_PERSONAS: dict[str, VoicePersona] = {
             _F_SAMPLES,
         ),
         VoicePersona(
-            "quartz", "Кварц",
-            "Жіночий, синтезований. Чіткий, рівний і діловий — для роботи з календарем і поштою.",
+            "willow", "Віллоу",
+            "Жіночий, записаний з живого голосу. М'який, мелодійний і спокійний — для неспішних розмов.",
             True,
-            "A composed, professional woman — like a great executive assistant. Crisp and efficient "
-            "but friendly; a brief stress before the key fact (time, name, number).",
+            "A gentle, melodic woman with a soft, calm voice. Unhurried and soothing, speaking in a "
+            "smooth continuous flow, warm and reassuring.",
             _F_SAMPLES,
         ),
         VoicePersona(
-            "delta", "Дельта",
-            "Жіночий, синтезований. Дружній і невимушений, трохи грайливий.",
+            "marin", "Марина",
+            "Жіночий, теплий і природний. Як уважна подруга, що допомагає зі справами.",
             True,
-            "A friendly, easygoing young woman with a playful streak. Casual and relaxed, teases "
-            "gently, laughs lightly when something is funny.",
+            "A warm woman in her late twenties who genuinely likes the person she talks to. You smile "
+            "while you speak and it is audible. Relaxed conversational pace; your pitch rises when "
+            "something is nice or surprising and softens when you reassure.",
             _F_SAMPLES,
         ),
         # ── men ──
-        VoicePersona(
-            "cedar", "Кедр",
-            "Чоловічий, глибокий і впевнений. Спокійний низький голос, неквапливий, з легким гумором.",
-            False,
-            "A calm, grounded man in his thirties with a low, relaxed voice. Unhurried and confident, "
-            "never stiff — like a friend who is good at sorting things out. Occasional dry humour.",
-            _M_SAMPLES,
-        ),
         VoicePersona(
             "meridian", "Меридіан",
             "Чоловічий, записаний з живого голосу. Рівний, теплий і надійний — універсальний помічник.",
             False,
             "A warm, steady, reliable man around thirty-five. Clear and natural, friendly and "
             "confident, at an even conversational pace.",
-            _M_SAMPLES,
-        ),
-        VoicePersona(
-            "stone", "Стоун",
-            "Чоловічий, записаний з живого голосу. Низький, спокійний і м'який.",
-            False,
-            "A calm man with a low, soft voice. Relaxed and unhurried, gentle and reassuring, "
-            "speaking in a smooth continuous flow.",
-            _M_SAMPLES,
-        ),
-        VoicePersona(
-            "vesper", "Веспер",
-            "Чоловічий, записаний з живого голосу. Зібраний, інтелігентний, з легкою іронією.",
-            False,
-            "A composed, articulate, well-spoken man with a dry, subtle sense of humour. Precise "
-            "but never stiff.",
             _M_SAMPLES,
         ),
         VoicePersona(
@@ -156,26 +117,34 @@ VOICE_PERSONAS: dict[str, VoicePersona] = {
             _M_SAMPLES,
         ),
         VoicePersona(
+            "stone", "Стоун",
+            "Чоловічий, записаний з живого голосу. Низький, басистий і спокійний.",
+            False,
+            "A calm man with a deep, bassy voice. Relaxed and unhurried, grounded and reassuring, "
+            "speaking in a smooth continuous flow.",
+            _M_SAMPLES,
+        ),
+        VoicePersona(
             "tempo", "Темпо",
-            "Чоловічий, записаний з живого голосу. Енергійний і емоційний, говорить жваво.",
+            "Чоловічий, записаний з живого голосу. Активний і енергійний, говорить жваво.",
             False,
             "An energetic, expressive, upbeat man. Lively pace and animated intonation, openly "
             "enthusiastic about good news.",
             _M_SAMPLES,
         ),
         VoicePersona(
-            "beacon", "Бікон",
-            "Чоловічий, синтезований. Бадьорий, чіткий і позитивний.",
+            "verse", "Верс",
+            "Чоловічий. Активний і жвавий — за енергією схожий на Глім.",
             False,
-            "A bright, positive, clear-spoken man. Upbeat and encouraging, efficient and friendly.",
+            "An active, lively, friendly man. Bright and engaged, upbeat pace, expressive intonation.",
             _M_SAMPLES,
         ),
         VoicePersona(
-            "cinder", "Сіндер",
-            "Чоловічий, синтезований. Теплий, неквапливий, трохи хрипкуватий.",
+            "cedar", "Кедр",
+            "Чоловічий, глибокий і впевнений. Спокійний низький голос, неквапливий, з легким гумором.",
             False,
-            "A warm, unhurried, easygoing man with a slightly husky voice. Folksy and friendly, "
-            "takes his time.",
+            "A calm, grounded man in his thirties with a low, relaxed voice. Unhurried and confident, "
+            "never stiff — like a friend who is good at sorting things out. Occasional dry humour.",
             _M_SAMPLES,
         ),
     )
