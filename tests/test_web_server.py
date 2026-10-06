@@ -251,7 +251,7 @@ def test_voice_change_keeps_the_conversation(client):
         user.executor.execute("change_voice", {"voice": "meridian"}, ToolExecutionContext(session_id="s1"))
     )
     assert result.ok and user.voice == "meridian"
-    assert bridge.close_after_reply  # the page reconnects with the new voice…
+    assert bridge.restart_for_voice  # the page reconnects with the new voice…
     assert client.get("/api/me", headers={"X-Client-Id": "carol-browser-0123456789"}).json()["reconnect"] is True
 
     config = web._session_config(user)  # …and the new session gets the whole conversation
@@ -292,3 +292,113 @@ def test_new_conversation_and_sign_out_clear_history(client):
     user.conversation.add("user", "секрет")
     client.post("/api/google/disconnect", headers=headers)
     assert len(user.conversation) == 0
+
+
+def test_voice_change_closes_the_call_without_a_spoken_confirmation():
+    """change_voice: no «перемикаю…» — the old session is closed, the new voice carries on."""
+    from server.live_bridge import SidebandToolBridge
+
+    user = web.users.get("frank-browser-0123456789")
+    sent = []
+
+    class Conn:
+        class session:
+            @staticmethod
+            async def close():
+                sent.append("close")
+
+        class response:
+            @staticmethod
+            async def create(**kw):
+                sent.append("response.create")
+
+            class item:
+                @staticmethod
+                async def create(**kw):
+                    sent.append("item.create")
+
+    bridge = SidebandToolBridge(client=None, session_id="s2", executor=user.executor)
+    bridge._connection = Conn()
+    user.bridges.add(bridge)
+    asyncio.run(
+        bridge._execute_and_continue(
+            name="change_voice", arguments={"voice": "stone"}, call_id="c1", delegation_id=None, response_id=None
+        )
+    )
+    assert user.voice == "stone" and user.reconnect_pending
+    assert sent == ["close"]  # no tool output / response.create → she says nothing in the old voice
+    user.bridges.clear()
+
+
+def test_voice_request_detection_for_the_nudge():
+    from voice.options import VOICE_REQUEST_RE as voice_request
+
+    for text in ["Єва, зміни голос на чоловічий", "постав інший голос", "поміняй, будь ласка, голос",
+                 "давай голос на жіночий", "Голос на спокійніший"]:
+        assert voice_request.search(text), text
+    for text in ["голос у тебе гарний", "зміни зустріч на завтра", "зроби нагадування про голосування"]:
+        assert not voice_request.search(text), text
+
+
+def test_voice_request_picks_the_voice():
+    from voice.options import voice_request_target as target
+
+    assert target("Єва, зміни голос на чоловічий", "gleam") == "meridian"
+    assert target("зміни голос на чоловічий", "meridian") == "ripple"  # already a man: the next one
+    assert target("постав жіночий голос", "stone") == "gleam"
+    assert target("зміни голос на інший", "gleam") == "bossa"
+    assert target("зроби голос спокійніший", "gleam") == "willow"
+    assert target("зроби голос спокійніший", "tempo") == "stone"
+    assert target("постав голос Босу", "gleam") == "bossa"
+    assert target("переключи голос на Кедра", "gleam") == "cedar"
+    assert target("що в мене завтра?", "gleam") is None
+    assert target("Єва, змини голос на чоловічий", "gleam") == "meridian"  # STT spelling
+    assert target("Єва, зміни голос", "gleam") == "bossa"  # bare: just another one
+    assert target("Єва, змини голос на Нагадай, як мене звати", "gleam") is None  # cut off: unclear
+
+
+def test_bridge_switches_voice_from_the_transcript(monkeypatch):
+    """The model said only «Секунду»: the server switches the voice from what the user said."""
+    import server.live_bridge as bridge_mod
+    from server.live_bridge import SidebandToolBridge
+
+    monkeypatch.setattr(bridge_mod, "_UTTERANCE_PAUSE_S", 0.01)
+    user = web.users.get("gina-browser-0123456789a")
+    user.voice = "gleam"
+    closed = []
+
+    class Conn:
+        class session:
+            @staticmethod
+            async def close():
+                closed.append(True)
+
+    bridge = SidebandToolBridge(
+        client=None, session_id="s3", executor=user.executor, on_voice_request=user.switch_voice_by_request
+    )
+    bridge._connection = Conn()
+
+    async def talk():
+        for delta in ["Єва, зміни голос на ", "чоловічий."]:
+            await bridge._handle_event({"type": "session.input_transcript.delta", "delta": delta})
+        await asyncio.sleep(0.1)
+
+    asyncio.run(talk())
+    assert user.voice == "meridian" and user.reconnect_pending and closed == [True]
+
+
+def test_voice_request_endpoint_and_dedup(client):
+    headers = {"X-Client-Id": "hank-browser-0123456789a"}
+    user = web.users.get("hank-browser-0123456789a")
+    user.voice = "gleam"
+    first = client.post("/api/voice-request", json={"text": "Єва, зміни голос на чоловічий"}, headers=headers).json()
+    assert first == {"switched": True, "voice": "meridian"}
+    # the same request arriving again (Live transcript / the model): no second switch
+    again = client.post("/api/voice-request", json={"text": "Єва, зміни голос на чоловічий"}, headers=headers).json()
+    assert again == {"switched": False, "voice": "meridian"}
+    result = asyncio.run(
+        user.executor.execute("change_voice", {"voice": "ripple"}, ToolExecutionContext(session_id="s"))
+    )
+    assert result.ok and user.voice == "meridian"
+    other = client.post("/api/voice-request", json={"text": "котра година?"}, headers=headers).json()
+    assert other["switched"] is False

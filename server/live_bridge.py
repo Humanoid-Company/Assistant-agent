@@ -19,8 +19,12 @@ from openai import AsyncOpenAI
 from tools.executor import ToolExecutionContext, ToolExecutor
 from voice.conversation import ConversationLog
 from voice.delegation import extract_completed_function_call
+from voice.options import VOICE_REQUEST_RE
 
 logger = logging.getLogger(__name__)
+
+# A request ends when the transcript has been quiet this long («зміни голос на …» + «чоловічий»).
+_UTTERANCE_PAUSE_S = 0.9
 
 
 def _attr(obj: Any, name: str) -> Any:
@@ -39,6 +43,7 @@ class SidebandToolBridge:
         on_closed: Callable[[SidebandToolBridge], None] | None = None,
         max_duration_s: float | None = None,
         conversation: ConversationLog | None = None,
+        on_voice_request: Callable[[str], bool] | None = None,
     ) -> None:
         self._client = client
         self.session_id = session_id
@@ -53,10 +58,13 @@ class SidebandToolBridge:
         self._input_buf = ""
         self.end_requested = False
         self._conversation = conversation
-        # Set by change_voice: close the session once the model has said its one-line
-        # confirmation, so the page reconnects with the new voice (Live voices are fixed per session).
-        self.close_after_reply = False
-        self._last_output_at = 0.0
+        # Set by change_voice: close the session right away (no spoken confirmation) so the page
+        # reconnects in the new voice — Live voices are fixed per session — and carries on.
+        self.restart_for_voice = False
+        # «зміни голос …» is acted on here: the Live model often says «Секунду» and never delegates
+        # it. on_voice_request(utterance) → True when it switched the voice (then we restart).
+        self._on_voice_request = on_voice_request
+        self._voice_check: asyncio.Task | None = None
 
     async def run(self) -> None:
         expiry: asyncio.Task | None = None
@@ -103,18 +111,17 @@ class SidebandToolBridge:
             content=text, delegation_id=None, event_id=f"instr_{uuid.uuid4().hex[:8]}"
         )
 
-    async def _close_when_reply_done(self, *, quiet_s: float = 1.2, max_wait_s: float = 10.0) -> None:
-        """Close once the model's last words have been streamed (no output for quiet_s)."""
-        loop = asyncio.get_running_loop()
-        started = loop.time()
-        while self.is_open and loop.time() - started < max_wait_s:
-            await asyncio.sleep(0.2)
-            spoke = self._last_output_at > started
-            if spoke and loop.time() - self._last_output_at >= quiet_s:
-                # The transcript leads the audio slightly: give playback a moment to finish.
-                await asyncio.sleep(1.5)
-                break
-        await self.close()
+    async def _voice_request_after_pause(self, utterance: str) -> None:
+        await asyncio.sleep(_UTTERANCE_PAUSE_S)
+        self._voice_check = None
+        if not self.is_open or self._on_voice_request is None:
+            return
+        # The transcript buffer may have moved on (the model answered); use the latest text.
+        text = self._input_buf if VOICE_REQUEST_RE.search(self._input_buf) else utterance
+        if self._on_voice_request(text):
+            logger.info("web.voice.restart session_id=%s by=transcript", self.session_id)
+            self.restart_for_voice = False
+            await self.close()
 
     async def _expire_after(self, seconds: float) -> None:
         """Cost cap: a call nobody ended (tab left open, browser crashed) is closed server-side."""
@@ -136,10 +143,13 @@ class SidebandToolBridge:
             self._input_buf += delta
             if self._conversation is not None:
                 self._conversation.add("user", delta)
+            if self._on_voice_request is not None and VOICE_REQUEST_RE.search(self._input_buf):
+                if self._voice_check is not None:
+                    self._voice_check.cancel()  # wait for the end of the request
+                self._voice_check = asyncio.create_task(self._voice_request_after_pause(self._input_buf))
             return
         if etype == "session.output_transcript.delta":
             delta = _attr(event, "delta") or ""
-            self._last_output_at = asyncio.get_running_loop().time()
             if self._conversation is not None:
                 self._conversation.add("assistant", delta)
             if self._input_buf.strip():
@@ -210,6 +220,12 @@ class SidebandToolBridge:
             return
         if name == "end_conversation" and result.ok:
             self.end_requested = True
+        if self.restart_for_voice:
+            # Don't let this session say anything more: the next one, in the new voice, carries on.
+            self.restart_for_voice = False
+            logger.info("web.voice.restart session_id=%s", self.session_id)
+            await self.close()
+            return
         logger.info(
             "web.tool.result session_id=%s call_id=%s tool_name=%s status=%s",
             self.session_id,
@@ -227,6 +243,3 @@ class SidebandToolBridge:
                 return  # continue only once every call of this response has a result
         if self.is_open:
             await self._connection.response.create(event_id=f"continue_{call_id}")
-        if self.close_after_reply and self.is_open:
-            self.close_after_reply = False
-            await self._close_when_reply_done()

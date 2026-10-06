@@ -226,6 +226,7 @@ async def create_session(
         on_closed=user.bridges.discard,
         max_duration_s=MAX_SESSION_S,
         conversation=user.conversation,
+        on_voice_request=user.switch_voice_by_request,
     )
     user.bridges.add(bridge)
     task = asyncio.create_task(bridge.run())
@@ -297,6 +298,25 @@ async def set_voice(
     if delivery_changed:
         await user.apply_delivery()
     return {"voice": user.voice, "speed": user.speed, "style": user.style}
+
+
+class VoiceRequestBody(BaseModel):
+    text: str
+
+
+@app.post("/api/voice-request")
+def voice_request(
+    body: VoiceRequestBody,
+    x_client_id: str | None = Header(default=None),
+    x_access_code: str | None = Header(default=None),
+) -> dict:
+    """«Єва, зміни голос на …» heard by the browser's recogniser — faster than the Live transcript.
+    The page restarts the call in the new voice when switched is true."""
+    user = _user(x_client_id, x_access_code)
+    switched = user.switch_voice_by_request(body.text[:500])
+    if switched:
+        user.reconnect_pending = False  # the page reconnects itself
+    return {"switched": switched, "voice": user.voice}
 
 
 @app.delete("/api/conversation")

@@ -253,6 +253,8 @@
     return pair ? words.slice(Math.max(pair[0], pair[1]) + 1).join(" ") : null;
   }
   const isStop = (text) => evaPair(evaTokens(text), EVA_STOP_VERBS) !== null;
+  // «зміни голос на …» — same pattern as VOICE_REQUEST_RE in voice/options.py; the server picks the voice.
+  const VOICE_REQUEST_RE = /(змін|змин|поміня|постав|переключ|перемкн|увімкн|зроби|давай)[а-яіїєґ'a-z]*[\s,]+([^\s,]+[\s,]+){0,3}?голос(?:у|а|ом)?(?![а-яіїєґ'a-z])|(^|[^а-яіїєґ'a-z])голос\s+на\s/i;
 
   // mode: off → connecting → waiting («Єва, скажи»; the model is muted) ⇄ active (listening /
   // thinking / speaking); switching = reconnecting with a new voice.
@@ -465,9 +467,12 @@
       case "session.closed":
         onSessionClosed();
         break;
-      case "error":
-        addLine("system", "Помилка: " + ((event.error && event.error.message) || "невідома"));
+      case "error": {
+        const message = (event.error && event.error.message) || "невідома";
+        // A voice switch closes the call while the page may still be sending: not a real error.
+        if (!/session is closing/i.test(message)) addLine("system", "Помилка: " + message);
         break;
+      }
       default:
         break;
     }
@@ -519,11 +524,13 @@
     showState();
     updateButtons();
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
+      // A voice switch / new conversation keeps the microphone open: no new permission, faster.
+      const live = mic && mic.getAudioTracks().some((t) => t.readyState === "live");
+      const stream = live ? mic : await navigator.mediaDevices.getUserMedia({
         // Browser echo cancellation keeps the agent from hearing (and interrupting) itself.
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       });
-      if (my !== attempt) { stream.getTracks().forEach((t) => t.stop()); return; }
+      if (my !== attempt) { if (stream !== mic) stream.getTracks().forEach((t) => t.stop()); return; }
       mic = stream;
       const peer = new RTCPeerConnection();
       pc = peer;
@@ -535,11 +542,12 @@
         if (pc !== peer) return;
         const state = peer.connectionState;
         clearTimeout(dropTimer);
-        if (state === "failed") stop("З'єднання втрачено", "err");
+        // The server ends the call itself to restart it in a new voice: check before giving up.
+        if (state === "failed" || state === "closed") onSessionClosed("З'єднання втрачено", "err");
         // "disconnected" is often a network blip that recovers by itself (Wi-Fi switch etc.).
         else if (state === "disconnected") {
           setStatus("Зв'язок перервався — відновлюю…", "busy");
-          dropTimer = setTimeout(() => { if (pc === peer) stop("З'єднання втрачено", "err"); }, 8000);
+          dropTimer = setTimeout(() => { if (pc === peer) onSessionClosed("З'єднання втрачено", "err"); }, 8000);
         } else if (state === "connected") showState();
       };
       const newGate = await createNoiseGate(mic, onGateSignal);
@@ -549,6 +557,7 @@
       else mic.getTracks().forEach((track) => peer.addTrack(track, mic));
       channel = peer.createDataChannel("oai-events");
       channel.onmessage = (e) => { if (pc === peer) onServerEvent(e.data); };
+      channel.onclose = () => { if (pc === peer && eva.mode !== "connecting" && eva.mode !== "switching") onSessionClosed(); };
 
       const offer = await peer.createOffer();
       await peer.setLocalDescription(offer);
@@ -583,7 +592,12 @@
     setRemoteVolume(1);
     startPhraseListener();
     if (opts.switched) {
-      commentary("Your voice was just changed at the user's request. In one short sentence, in the new voice, say it is done, then continue the conversation where it was.");
+      // A new voice is a new session: carry on as if nothing happened — no «тепер я іншим голосом».
+      // Asked by voice: nothing to say — she just listens on in the new voice.
+      if (opts.interrupted) {
+        commentary("Your voice was just changed while you were saying: «" + opts.interrupted.slice(-500) +
+          "». Continue exactly that answer in the new voice from where it stopped (its last few words may not have been heard) — do not start it over, do not mention the voice change.");
+      }
     } else if (opts.say) {
       commentary(opts.say);
     } else if (opts.greet) {
@@ -595,14 +609,15 @@
   }
 
   // Close the call but keep Єва's mode (pause, voice switch); stop() also turns her off.
-  function teardown() {
+  // keepMic: a new session follows right away (voice switch, new conversation).
+  function teardown({ keepMic = false } = {}) {
     attempt += 1;
     clearTimeout(dropTimer);
     clearTimeout(idleTimer);
     sendEvent({ type: "session.close" });
     if (pc) { pc.close(); pc = null; }
     if (gate) { gate.close(); gate = null; }
-    if (mic) { mic.getTracks().forEach((t) => t.stop()); mic = null; }
+    if (mic && !keepMic) { mic.getTracks().forEach((t) => t.stop()); mic = null; }
     channel = null;
     closeBubbles();
     bargeReset();
@@ -695,6 +710,7 @@
         for (let k = 0; k < result.length; k++) {
           const text = result[k].transcript;
           if (eva.mode === "active" && isStop(text)) { pauseEva(); return; }
+          if (eva.mode === "active" && result.isFinal && VOICE_REQUEST_RE.test(text)) { requestVoiceChange(text); return; }
           // Wake on the final text only: it carries the whole request after «Єва, скажи».
           if (eva.mode === "waiting" && result.isFinal) {
             const rest = matchWake(text);
@@ -735,17 +751,17 @@
     if (eva.mode === "off" || eva.mode === "connecting") return;
     if (paused && !pc) return; // closed during a pause: the next «Єва, скажи» opens it fresh
     clearTimeout(eva.pauseTimer);
-    teardown();
+    teardown({ keepMic: true });
     eva.mode = mode;
     await start(paused ? { paused: true } : opts);
   }
 
   // The server closed the call: after change_voice (asked by voice) to restart it in the new
   // voice — otherwise it really ended.
-  async function onSessionClosed() {
+  async function onSessionClosed(text = "Розмову завершено", state = "") {
     if (eva.mode === "switching" || eva.mode === "off" || eva.mode === "connecting") return;
     const wasPaused = eva.mode === "waiting";
-    teardown();
+    teardown({ keepMic: true });
     eva.mode = "connecting";
     showState();
     let me = null;
@@ -760,11 +776,12 @@
       showVoice();
       addLine("system", "Голос змінено на «" + voiceLabel(voice) + "».");
       eva.mode = "switching";
-      await start(wasPaused ? { paused: true } : { switched: true });
+      await start(wasPaused ? { paused: true } : { switched: true, afterCommand: true });
       return;
     }
+    if (mic) { mic.getTracks().forEach((t) => t.stop()); mic = null; }
     if (wasPaused) { eva.mode = "waiting"; startPhraseListener(); showState(); updateButtons(); return; }
-    stop("Розмову завершено");
+    stop(text, state);
   }
 
   // ── voice settings ──
@@ -802,16 +819,20 @@
     } catch { /* backend offline: picker stays disabled */ }
   }
 
+  // What Єва is saying right now (the transcript runs slightly ahead of the audio).
+  const speakingNow = () => (barge.audible && openMsg.assistant ? openMsg.assistant.textContent.trim() : "");
+
   async function applyVoice() {
     const id = $("voice").value;
     if (!voices.some((x) => x.id === id) || id === voice) return;
+    const interrupted = eva.mode === "active" ? speakingNow() : "";
     voice = id;
     store.set("va-voice", id);
     showVoice();
     await fetch(BACKEND + "/api/voice", { method: "POST", headers: headers(), body: JSON.stringify({ voice: id }) }).catch(() => {});
     if (eva.mode === "active" || eva.mode === "waiting") {
       addLine("system", "Голос змінено на «" + voiceLabel(id) + "».");
-      restartSession("switching", { switched: true });
+      restartSession("switching", { switched: true, interrupted });
     }
   }
 
@@ -844,6 +865,26 @@
     preview = audio;
     $("voicePreview").textContent = "■ Стоп";
     audio.play().catch(stopPreview);
+  }
+
+  // Heard «зміни голос …» ourselves: switch at once instead of waiting for the slower Live
+  // transcript (that path, on the server, stays as a fallback; the server dedups the two).
+  async function requestVoiceChange(text) {
+    if (eva.voiceRequestBusy) return;
+    eva.voiceRequestBusy = true;
+    try {
+      const res = await fetch(BACKEND + "/api/voice-request", { method: "POST", headers: headers(), body: JSON.stringify({ text }) });
+      const data = res.ok ? await res.json() : null;
+      if (data && data.switched && eva.mode === "active" && voices.some((x) => x.id === data.voice)) {
+        voice = data.voice;
+        store.set("va-voice", voice);
+        showVoice();
+        addLine("system", "Голос змінено на «" + voiceLabel(voice) + "».");
+        restartSession("switching", { switched: true });
+      }
+    } catch { /* offline: the server-side path may still switch */ } finally {
+      eva.voiceRequestBusy = false;
+    }
   }
 
   async function newConversation() {

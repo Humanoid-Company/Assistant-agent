@@ -38,6 +38,7 @@ from voice.options import (
     VOICE_PERSONAS,
     _sanitize_name,
     delivery_instruction,
+    voice_request_target,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,7 @@ _STATE_DIR = Path(tempfile.gettempdir()) / "voice-agent-web"
 _MAX_USERS = 500
 _IDLE_EVICT_S = 24 * 3600
 _background: set[asyncio.Task] = set()
+VOICE_SWITCH_DEDUP_S = 15.0
 
 _CONNECT_ON_PAGE = (
     "Щоб підключити Google, натисніть на сторінці кнопку «Підключити Google». Відкриється вікно "
@@ -67,10 +69,26 @@ class WebUser:
     # The voice was changed during a call: the page reconnects with the new voice and the same
     # conversation once the current session closes.
     reconnect_pending: bool = False
+    # Several paths can act on one «зміни голос …» (browser recogniser, transcript, the model):
+    # within this window after a switch the others are the same request, not a new one.
+    voice_switched_at: float = 0.0
     # Dialogue history independent of the Live session (and so of the voice).
     conversation: ConversationLog = field(default_factory=ConversationLog)
     last_seen: float = field(default_factory=time.time)
     bridges: set[Any] = field(default_factory=set)  # live SidebandToolBridge objects
+
+    def switch_voice_by_request(self, utterance: str) -> bool:
+        """«Єва, зміни голос на …» heard in the transcript: switch now (the page reconnects)."""
+        if time.time() - self.voice_switched_at < VOICE_SWITCH_DEDUP_S:
+            return False
+        voice = voice_request_target(utterance, self.voice)
+        if voice is None or voice == self.voice:
+            return False
+        logger.info("web.voice.by_request %s → %s", self.voice, voice)
+        self.voice = voice
+        self.reconnect_pending = True
+        self.voice_switched_at = time.time()
+        return True
 
     async def apply_delivery(self) -> None:
         """Push the current speed/style into the running call."""
@@ -137,19 +155,17 @@ def _build_executor(user: WebUser) -> ToolExecutor:
         if voice not in VOICE_PERSONAS:
             names = ", ".join(f"{p.label} ({p.voice})" for p in VOICE_PERSONAS.values())
             return ToolResult(ok=False, status="needs_more_info", message=f"Такого голосу немає. Доступні: {names}.")
-        if voice == user.voice:
-            return ToolResult(ok=True, status="ok", message=f"Голос «{VOICE_PERSONAS[voice].label}» уже стоїть.")
+        if voice == user.voice or time.time() - user.voice_switched_at < VOICE_SWITCH_DEDUP_S:
+            return ToolResult(ok=True, status="ok", message="Голос уже змінено. Нічого про це не кажи.")
         user.voice = voice
         user.reconnect_pending = True
+        user.voice_switched_at = time.time()
         for bridge in list(user.bridges):
-            bridge.close_after_reply = True  # the page reconnects with the new voice and the same history
+            bridge.restart_for_voice = True  # the page reconnects with the new voice and the same history
         return ToolResult(
             ok=True,
             status="ok",
-            message=(
-                f"Перемикаю на голос «{VOICE_PERSONAS[voice].label}». Скажи одним коротким реченням, що "
-                "зараз переключишся, — за секунду розмова продовжиться новим голосом з усією пам'яттю."
-            ),
+            message="Голос змінено. Нічого про це не кажи — розмова одразу продовжиться новим голосом.",
         )
 
     def set_voice_style(args: dict, ctx: ToolExecutionContext) -> ToolResult:

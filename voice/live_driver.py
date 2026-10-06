@@ -25,6 +25,7 @@ from voice.options import (
     STYLE_OPTIONS,
     _sanitize_name,
     delivery_instruction,
+    voice_request_target,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,7 @@ class LiveDriverMixin:
             voice=voice,
             session_id=self._router_session_id,
             conversation=self._conversation,
+            on_voice_request=lambda text: self._voice_by_request(text, voice),
         )
         voice_restart = getattr(self, "_voice_restarted", False)
         self._voice_restarted = False
@@ -78,10 +80,7 @@ class LiveDriverMixin:
             )
             wake_request, self._wake_request = self._wake_request, ""
             if voice_restart:
-                live.speak_context(
-                    "The voice was just changed at the user's request. In one short sentence in the new "
-                    "voice say it is done, then continue the conversation where it was."
-                )
+                pass  # a new voice: no announcement, she just listens on with the same memory
             elif wake_request:
                 live.speak_context(f"The user just said to you: «{wake_request}». Answer it.")
             else:
@@ -138,6 +137,9 @@ class LiveDriverMixin:
                 status="error",
                 message=f"Голос {voice!r} не підтримується — скажи користувачу спробувати ще раз.",
             )
+        if time.monotonic() - getattr(self, "_voice_switched_at", -1e9) < 15:
+            return ToolResult(ok=True, status="ok", message="Голос уже змінено. Нічого про це не кажи.")
+        self._voice_switched_at = time.monotonic()
         self._memory["realtime_voice"] = voice
         self._memory["live_voice"] = voice
         self._save_memory()
@@ -148,10 +150,18 @@ class LiveDriverMixin:
             ok=True,
             status="ok",
             message=(
-                f"Голос змінено на {voice}. Скажи одним коротким реченням, що зараз переключишся — "
-                "розмова продовжиться новим голосом з усією пам'яттю."
+                "Голос змінено. Нічого про це не кажи — розмова одразу продовжиться новим голосом."
             ),
         )
+
+    def _voice_by_request(self, utterance: str, current: str) -> bool:
+        """«Єва, зміни голос на …» heard in the transcript: switch without waiting for the model."""
+        if time.monotonic() - getattr(self, "_voice_switched_at", -1e9) < 15:
+            return False  # the model already switched for this same request
+        voice = voice_request_target(utterance, current)
+        if voice is None or voice == current:
+            return False
+        return self._live_change_voice({"voice": voice}, None).ok
 
     def _live_set_voice_style(self, args: dict, context: ToolExecutionContext) -> ToolResult:
         """Speed/style of the current voice — instructions, applied from the next sentence."""

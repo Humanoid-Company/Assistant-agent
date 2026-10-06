@@ -154,6 +154,66 @@ VOICE_PERSONAS: dict[str, VoicePersona] = {
     )
 }
 
+# «Єва, зміни голос на чоловічий» — handled by the app itself: the Live model often answers
+# «Секунду» and never delegates the change. The request needs a change verb near «голос».
+VOICE_REQUEST_RE = re.compile(
+    r"(змін|змин|поміня|постав|переключ|перемкн|увімкн|зроби|давай)\w*[\s,]+(\S+[\s,]+){0,3}?голос(?:у|а|ом)?\b"
+    r"|\bголос\s+на\s",
+    re.IGNORECASE,
+)
+# Picker names as people say them (stems, so «Босу», «Марину», «Віллоу» all match), and voice ids.
+_VOICE_NAME_STEMS: dict[str, str] = {
+    "глім": "gleam", "босс": "bossa", "боса": "bossa", "босу": "bossa", "віллоу": "willow", "вілоу": "willow",
+    "марин": "marin", "меридіан": "meridian", "ріпл": "ripple", "стоун": "stone", "темп": "tempo",
+    "верс": "verse", "кедр": "cedar",
+}
+
+
+def voice_request_target(text: str, current: str | None) -> str | None:
+    """The picker voice a «зміни голос …» request asks for; None if it isn't one or is unclear.
+
+    Only an explicit wish switches: a gender, a name, «інший», «спокійніший», or a bare «зміни
+    голос». A cut-off transcript («зміни голос на …» and nothing usable) changes nothing — the model
+    heard the audio and may still delegate it.
+    """
+    match = VOICE_REQUEST_RE.search(text or "")
+    if not match:
+        return None
+    # Look only at the request itself, not at whatever was said before or after it.
+    words = re.findall(r"[a-zа-яіїєґ']+", text[match.start(): match.end() + 40].lower())
+    tail = text[match.end():].strip(" .,!?…").lower()
+    qualified = any(
+        w in VOICE_PERSONAS or any(w.startswith(stem) for stem in _VOICE_NAME_STEMS)
+        or w.startswith(("чолов", "жіноч", "інш", "спокійн", "тихіш", "м'якш"))
+        for w in words
+    )
+    if not qualified and tail:
+        return None
+    for word in words:
+        if word in VOICE_PERSONAS:
+            return word
+        for stem, voice in _VOICE_NAME_STEMS.items():
+            if word.startswith(stem):
+                return voice
+    women = [p.voice for p in VOICE_PERSONAS.values() if p.feminine]
+    men = [p.voice for p in VOICE_PERSONAS.values() if not p.feminine]
+    now = VOICE_PERSONAS.get(current or "")
+    if any(w.startswith("чолов") for w in words):
+        pool = men
+    elif any(w.startswith("жіноч") for w in words):
+        pool = women
+    else:
+        pool = women if (now is None or now.feminine) else men
+    if any(w.startswith("спокійн") or w.startswith("тихіш") or w.startswith("м'якш") for w in words):
+        calm = "willow" if pool is women else "stone"
+        if calm != current:
+            return calm
+    # «інший» / just «зміни голос» / «на чоловічий» when already a man: the next one in the list.
+    if current in pool:
+        return pool[(pool.index(current) + 1) % len(pool)]
+    return pool[0]
+
+
 # Speed and style of delivery. GPT-Live has no speed/pitch parameter, so these are instructions
 # to the model — applied at session start and, when changed mid-call, appended live.
 SPEED_OPTIONS: dict[str, str] = {

@@ -43,6 +43,7 @@ from voice.conversation import ConversationLog
 from voice.delegation import extract_completed_function_call
 from voice.interrupt_intent import classify_interjection
 from voice.local_vad import LocalSpeechDetector
+from voice.options import VOICE_REQUEST_RE
 from voice.playback import PlaybackTracker
 from voice.wake_phrases import is_stop
 
@@ -99,6 +100,7 @@ class LiveVoiceSession:
         session_id: str | None = None,
         cue_synthesize: Callable[[str], bytes | None] | None = None,
         conversation: ConversationLog | None = None,
+        on_voice_request: Callable[[str], bool] | None = None,
     ) -> None:
         self._executor = tool_executor
         self._voice = voice or OPENAI_LIVE_VOICE
@@ -114,8 +116,11 @@ class LiveVoiceSession:
         self._output_buf = ""
         # History shared across sessions (voice changes, sleep/wake): read at startup, fed here.
         self._conversation = conversation
-        self._recent_user_text = ""  # rolling window for «Дякую, Єва»
+        self._recent_user_text = ""  # rolling window for «Дякую, Єва» / «зміни голос …»
         self._pause_requested = False
+        # «зміни голос на …»: the app switches the voice itself (the model often doesn't delegate it).
+        self._on_voice_request = on_voice_request
+        self._voice_check: asyncio.Task | None = None
 
         self._sleep_requested = False
         self._voice_restart_requested = False
@@ -689,6 +694,10 @@ class LiveVoiceSession:
                 self._pause_requested = True
                 self.stop_playback()
                 self._sleep_requested = True
+            if self._on_voice_request is not None and VOICE_REQUEST_RE.search(self._recent_user_text):
+                if self._voice_check is not None:
+                    self._voice_check.cancel()  # wait for the end of the request
+                self._voice_check = asyncio.get_running_loop().create_task(self._voice_request_after_pause())
             if self._on_user_transcript:
                 try:
                     self._on_user_transcript(frag)
@@ -876,6 +885,18 @@ class LiveVoiceSession:
             delegation_id,
             call_id,
         )
+
+    async def _voice_request_after_pause(self) -> None:
+        await asyncio.sleep(0.9)
+        self._voice_check = None
+        if self._sleep_requested or self._on_voice_request is None:
+            return
+        text, self._recent_user_text = self._recent_user_text, ""
+        try:
+            if self._on_voice_request(text):
+                logger.info("live.voice.restart session_id=%s by=transcript", self.session_id)
+        except Exception:
+            logger.exception("voice request handler failed")
 
     async def _append_instruction(self, text: str) -> None:
         if self._connection is None:
