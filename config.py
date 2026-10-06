@@ -139,12 +139,8 @@ ROUTER_TASK_CATEGORIES: str = (
 )
 
 # ── Wake phrase ───────────────────────────────────────────────────────────────
-TRIGGER_PHRASES: list[str] = [
-    "привіт",
-    "агент",
-    "асистент",
-    "гей агент",
-]
+# Wake / pause phrases: «Єва, скажи» / «Дякую, Єва» — see voice/wake_phrases.py.
+TRIGGER_PHRASES: list[str] = ["єва, скажи"]
 
 # ── AI system prompt ──────────────────────────────────────────────────────────
 SYSTEM_PROMPT: str = (

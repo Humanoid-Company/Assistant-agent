@@ -15,9 +15,17 @@ from tools.executor import ToolExecutionContext
 from tools.results import ToolResult, agent_result_to_tool_result
 from tools.router_bridge import _run_connectivity_checks
 from voice.base import State
+from voice.conversation import ConversationLog
 from voice.live_session import LiveVoiceSession
 from voice.mic import LiveMicCapture
-from voice.options import LANGUAGE_OPTIONS, LIVE_VOICE_OPTIONS, _sanitize_name
+from voice.options import (
+    LANGUAGE_OPTIONS,
+    LIVE_VOICE_OPTIONS,
+    SPEED_OPTIONS,
+    STYLE_OPTIONS,
+    _sanitize_name,
+    delivery_instruction,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +37,8 @@ class LiveDriverMixin:
     _history: list[dict]
     _history_cutoff: int | None
     _pending_cutoff: int
+    _conversation: ConversationLog
+    _wake_request: str
 
     def _run_awake_session_live(self) -> None:
         """GPT-Live path: full duplex + Responses delegation. No manual turn create."""
@@ -44,7 +54,10 @@ class LiveDriverMixin:
             tool_executor=self._tool_executor,
             voice=voice,
             session_id=self._router_session_id,
+            conversation=self._conversation,
         )
+        voice_restart = getattr(self, "_voice_restarted", False)
+        self._voice_restarted = False
         self._live = live
         try:
             live.connect(
@@ -53,6 +66,9 @@ class LiveDriverMixin:
                     assistant_name=self._memory.get("assistant_name"),
                     today=date.today().isoformat(),
                     voice=voice,
+                    delivery=delivery_instruction(
+                        self._memory.get("speed", "normal"), self._memory.get("style", "normal")
+                    ),
                 ),
                 mic_read_chunk=mic.read_chunk,
                 backend_instructions=build_backend_prompt(
@@ -60,7 +76,16 @@ class LiveDriverMixin:
                     language_name=LANGUAGE_OPTIONS.get(self._memory.get("language", "uk"), LANGUAGE_OPTIONS["uk"]),
                 ),
             )
-            live.speak_context("Слухаю!")
+            wake_request, self._wake_request = self._wake_request, ""
+            if voice_restart:
+                live.speak_context(
+                    "The voice was just changed at the user's request. In one short sentence in the new "
+                    "voice say it is done, then continue the conversation where it was."
+                )
+            elif wake_request:
+                live.speak_context(f"The user just said to you: «{wake_request}». Answer it.")
+            else:
+                live.speak_context("Слухаю!")
             if alert := self._connectivity_watcher.pop_alert():
                 live.speak_context(alert)
             if pending := self._pop_deferred_announcement():
@@ -71,7 +96,10 @@ class LiveDriverMixin:
                 time.sleep(0.05)
             logger.info("[latency] Live awake session duration: %.1fs", time.monotonic() - t_start)
             live.stop_playback()
-            if not live.voice_restart_requested and not self._voice_change_pending:
+            # «Дякую, Єва» pauses: no goodbye, the conversation goes on after the next wake.
+            if live.pause_requested:
+                logger.info("Live paused by «Дякую, Єва» — waiting for the wake phrase.")
+            elif not live.voice_restart_requested and not self._voice_change_pending:
                 live.speak_context("До побачення!")
                 time.sleep(1.0)
         except Exception:
@@ -87,6 +115,7 @@ class LiveDriverMixin:
                 # Live: restart a new awake session with the new voice — do NOT kill the process.
                 logger.info("Live voice change — restarting voice session without process exit.")
                 self._voice_change_pending = False
+                self._voice_restarted = True
                 self.state = State.AWAKE
             else:
                 self.state = State.SLEEPING
@@ -119,10 +148,23 @@ class LiveDriverMixin:
             ok=True,
             status="ok",
             message=(
-                f"Голос змінено на {voice}. Зараз коротко попрощаюсь і одразу продовжу новим голосом "
-                "без перезапуску програми."
+                f"Голос змінено на {voice}. Скажи одним коротким реченням, що зараз переключишся — "
+                "розмова продовжиться новим голосом з усією пам'яттю."
             ),
         )
+
+    def _live_set_voice_style(self, args: dict, context: ToolExecutionContext) -> ToolResult:
+        """Speed/style of the current voice — instructions, applied from the next sentence."""
+        del context
+        speed = str(args.get("speed") or self._memory.get("speed", "normal")).strip().lower()
+        style = str(args.get("style") or self._memory.get("style", "normal")).strip().lower()
+        if speed not in SPEED_OPTIONS or style not in STYLE_OPTIONS:
+            return ToolResult(ok=False, status="error", message="Темп: slow/normal/fast, стиль: calm/normal/expressive.")
+        self._memory["speed"], self._memory["style"] = speed, style
+        self._save_memory()
+        if self._live is not None:
+            self._live.append_instruction(delivery_instruction(speed, style, changed=True))
+        return ToolResult(ok=True, status="ok", message="Готово, говорю так з наступного речення.")
 
     def _live_change_language(self, args: dict, context: ToolExecutionContext) -> ToolResult:
         del context

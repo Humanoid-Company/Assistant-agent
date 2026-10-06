@@ -1,7 +1,7 @@
 """OpenAI Responses function schemas for the GPT-Live backend."""
 from __future__ import annotations
 
-from voice.options import LANGUAGE_OPTIONS, LIVE_VOICE_OPTIONS, VOICE_PERSONAS
+from voice.options import LANGUAGE_OPTIONS, LIVE_VOICE_OPTIONS, SPEED_OPTIONS, STYLE_OPTIONS, VOICE_PERSONAS
 
 _CALENDAR_PROPS = {
     "title": {"type": "string"},
@@ -319,11 +319,23 @@ LIVE_BACKEND_TOOLS: list[dict] = [
     ),
     _fn(
         "change_voice",
-        "Change TTS voice. Live mode restarts the voice session (not the whole process). Voices: "
+        "Change the voice (timbre). The conversation continues in the new voice with its full "
+        "memory after a short pause. «чоловічий / жіночий» → pick one of that gender; «інший» → a "
+        "different one; «спокійніший» → a calm one (Віллоу, Стоун) or use set_voice_style. Voices: "
         + ", ".join(f"{p.voice} ({p.label}, {'жіночий' if p.feminine else 'чоловічий'})" for p in VOICE_PERSONAS.values())
         + ".",
         {"voice": {"type": "string", "enum": list(LIVE_VOICE_OPTIONS)}},
         required=["voice"],
+    ),
+    _fn(
+        "set_voice_style",
+        "Change how the current voice speaks, applied right away: speed (slow/normal/fast) and "
+        "style (calm/normal/expressive). For «говори повільніше / швидше / спокійніше / "
+        "емоційніше». Omitted fields keep their value.",
+        {
+            "speed": {"type": "string", "enum": list(SPEED_OPTIONS)},
+            "style": {"type": "string", "enum": list(STYLE_OPTIONS)},
+        },
     ),
     _fn(
         "change_language",

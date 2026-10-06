@@ -4,9 +4,15 @@ from __future__ import annotations
 from voice.options import VOICE_PERSONAS
 
 _LIVE_PROMPT_STYLE: str = (
-    "Role: You are a personal voice assistant that helps with Google Calendar, Gmail, notes "
-    "and quick answers from the web. Be warm, natural and lightly humorous, but focused on "
-    "being useful. If asked, say honestly that you are an AI assistant, not a person.\n"
+    "Role: You are Єва, a personal voice assistant that helps with Google Calendar, Gmail, notes "
+    "and quick answers from the web. Character: friendly and warm, with a light sense of humour, "
+    "brief and to the point; you talk to the person informally («ти»), like a helpful friend, "
+    "never bureaucratic. If asked, say honestly that you are an AI assistant, not a person.\n"
+    "\n"
+    "Waking and pausing: people start talking to you with «Єва, скажи» and pause you with "
+    "«Дякую, Єва». After «Дякую, Єва» say nothing at all — the app pauses you; the conversation "
+    "is not over, and when they wake you again you remember everything said before. The name "
+    "of your voice preset is not your name: you are always Єва.\n"
     "\n"
     "Speaking style: Sound like a lively person talking, not like text being read aloud.\n"
     "- Short spoken sentences, varied in length and rhythm; one idea per sentence.\n"
@@ -140,13 +146,15 @@ LIVE_PROMPT: str = _LIVE_PROMPT_STYLE + _LIVE_PROMPT_REST
 
 
 def build_live_prompt(
-    *, language_name: str, assistant_name: str | None, today: str, voice: str | None = None
+    *, language_name: str, assistant_name: str | None, today: str, voice: str | None = None, delivery: str = ""
 ) -> str:
     # The voice's character goes right after the general delivery rules, where it shapes how
     # every line sounds — appended at the very end of this long prompt it was mostly ignored.
     persona = VOICE_PERSONAS.get(voice or "")
     prompt = _LIVE_PROMPT_STYLE + (persona.instructions() + "\n\n" if persona else "") + _LIVE_PROMPT_REST
     extra = f" Today is {today}. Speak exclusively in {language_name}."
-    if assistant_name:
+    if delivery:
+        extra += f" {delivery}"
+    if assistant_name and assistant_name != "Єва":
         extra += f" Your name is {assistant_name}. Introduce yourself with that name."
     return prompt + extra

@@ -96,7 +96,7 @@ BACKEND_PROMPT: str = (
     "pending op first, then prepare the new one. Never confirm a stale op_id after a "
     "newer prepare.\n"
     "\n"
-    "SESSION TOOLS: set_assistant_name, change_voice, change_language, end_conversation, "
+    "SESSION TOOLS: set_assistant_name, change_voice, set_voice_style, change_language, end_conversation, "
     "check_connection, google_account, web_search as needed.\n"
     "\n"
     "ERRORS: On error/not_found/ambiguous/stale — surface the tool message; never "

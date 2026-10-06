@@ -208,13 +208,13 @@ def test_voice_picker_lists_live_voices_and_saves_choice(client):
 
     headers = {"X-Client-Id": ALICE}
     assert client.get("/api/me", headers=headers).json()["voice"] is None
-    assert client.post("/api/voice", json={"voice": "willow"}, headers=headers).json() == {"voice": "willow"}
+    assert client.post("/api/voice", json={"voice": "willow"}, headers=headers).json()["voice"] == "willow"
     assert client.get("/api/me", headers=headers).json()["voice"] == "willow"
     assert client.post("/api/voice", json={"voice": "nope"}, headers=headers).status_code == 400
 
     config = web._session_config(web.users.get(ALICE))
     assert config["audio"]["output"]["voice"] == "willow"
-    assert "Your voice and character (Віллоу)" in config["instructions"]
+    assert "voice preset «Віллоу»" in config["instructions"]
     assert "feminine grammatical gender" in config["instructions"]
 
 
@@ -225,3 +225,70 @@ def test_voice_tool_accepts_only_picker_voices():
     assert not bad.ok and user.voice is None
     ok = asyncio.run(user.executor.execute("change_voice", {"voice": "gleam"}, ctx))
     assert ok.ok and user.voice == "gleam"
+
+
+def test_voice_change_keeps_the_conversation(client):
+    """Conversation → voice change by voice → the new session starts with everything said before."""
+    from server.live_bridge import SidebandToolBridge
+
+    user = web.users.get("carol-browser-0123456789")
+    bridge = SidebandToolBridge(
+        client=None, session_id="s1", executor=user.executor, conversation=user.conversation
+    )
+    user.bridges.add(bridge)
+
+    async def talk():
+        for etype, delta in [
+            ("session.input_transcript.delta", "Мене звати Остап, "),
+            ("session.input_transcript.delta", "я п'ю каву без цукру."),
+            ("session.output_transcript.delta", "Приємно, Остапе! Запам'ятала."),
+            ("session.input_transcript.delta", "Зміни голос на чоловічий."),
+        ]:
+            await bridge._handle_event({"type": etype, "delta": delta})
+
+    asyncio.run(talk())
+    result = asyncio.run(
+        user.executor.execute("change_voice", {"voice": "meridian"}, ToolExecutionContext(session_id="s1"))
+    )
+    assert result.ok and user.voice == "meridian"
+    assert bridge.close_after_reply  # the page reconnects with the new voice…
+    assert client.get("/api/me", headers={"X-Client-Id": "carol-browser-0123456789"}).json()["reconnect"] is True
+
+    config = web._session_config(user)  # …and the new session gets the whole conversation
+    assert config["audio"]["output"]["voice"] == "meridian"
+    texts = [(item["role"], item["content"][0]["text"]) for item in config["input"]]
+    assert texts == [
+        ("user", "Мене звати Остап, я п'ю каву без цукру."),
+        ("assistant", "Приємно, Остапе! Запам'ятала."),
+        ("user", "Зміни голос на чоловічий."),
+    ]
+    assert "you are always Єва" in config["instructions"]
+
+
+def test_speed_and_style_apply_to_the_running_call(client):
+    user = web.users.get("dave-browser-0123456789a")
+    sent = []
+
+    class FakeBridge:
+        async def append_instruction(self, text):
+            sent.append(text)
+
+    user.bridges.add(FakeBridge())
+    headers = {"X-Client-Id": "dave-browser-0123456789a"}
+    body = client.post("/api/voice", json={"speed": "slow", "style": "calm"}, headers=headers).json()
+    assert body["speed"] == "slow" and body["style"] == "calm"
+    assert len(sent) == 1 and "slower" in sent[0] and "calm" in sent[0]
+    assert "slower" in web._session_config(user)["instructions"]
+    assert client.post("/api/voice", json={"speed": "warp"}, headers=headers).status_code == 400
+    user.bridges.clear()
+
+
+def test_new_conversation_and_sign_out_clear_history(client):
+    headers = {"X-Client-Id": "erin-browser-0123456789a"}
+    user = web.users.get("erin-browser-0123456789a")
+    user.conversation.add("user", "секрет")
+    assert client.delete("/api/conversation", headers=headers).json()["ok"]
+    assert len(user.conversation) == 0 and "input" not in web._session_config(user)
+    user.conversation.add("user", "секрет")
+    client.post("/api/google/disconnect", headers=headers)
+    assert len(user.conversation) == 0

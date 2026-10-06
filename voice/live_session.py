@@ -39,10 +39,12 @@ from config import (
 from tools.executor import ToolExecutionContext, ToolExecutor
 from voice.barge_in_gate import BargeInAction, BargeInGate, BargeInState
 from voice.busy_cues import BusyCueController
+from voice.conversation import ConversationLog
 from voice.delegation import extract_completed_function_call
 from voice.interrupt_intent import classify_interjection
 from voice.local_vad import LocalSpeechDetector
 from voice.playback import PlaybackTracker
+from voice.wake_phrases import is_stop
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +98,7 @@ class LiveVoiceSession:
         on_user_transcript: Callable[[str], None] | None = None,
         session_id: str | None = None,
         cue_synthesize: Callable[[str], bytes | None] | None = None,
+        conversation: ConversationLog | None = None,
     ) -> None:
         self._executor = tool_executor
         self._voice = voice or OPENAI_LIVE_VOICE
@@ -109,6 +112,10 @@ class LiveVoiceSession:
         self._turns: list[dict] = []
         self._input_buf = ""
         self._output_buf = ""
+        # History shared across sessions (voice changes, sleep/wake): read at startup, fed here.
+        self._conversation = conversation
+        self._recent_user_text = ""  # rolling window for «Дякую, Єва»
+        self._pause_requested = False
 
         self._sleep_requested = False
         self._voice_restart_requested = False
@@ -185,6 +192,11 @@ class LiveVoiceSession:
 
     def request_sleep(self) -> None:
         self._sleep_requested = True
+
+    @property
+    def pause_requested(self) -> bool:
+        """«Дякую, Єва»: back to waiting for the wake phrase, conversation kept, no goodbye."""
+        return self._pause_requested
 
     def request_voice_restart(self) -> None:
         self._voice_restart_requested = True
@@ -345,7 +357,7 @@ class LiveVoiceSession:
                 self._connection = None
 
     def _session_config(self) -> dict[str, Any]:
-        return {
+        config: dict[str, Any] = {
             "model": self._live_model,
             "instructions": self._live_instructions,
             "audio": {
@@ -363,6 +375,9 @@ class LiveVoiceSession:
                 },
             },
         }
+        if self._conversation is not None and (history := self._conversation.live_input()):
+            config["input"] = history
+        return config
 
     def _backend_tools(self) -> list[dict]:
         from tools.live_schemas import LIVE_BACKEND_TOOLS
@@ -666,6 +681,14 @@ class LiveVoiceSession:
                 if playing or self._barge_gate.state == BargeInState.POSSIBLE:
                     self._on_interjection(frag)
             self._input_buf += frag
+            if self._conversation is not None:
+                self._conversation.add("user", frag)
+            self._recent_user_text = (self._recent_user_text + frag)[-80:]
+            if not self._pause_requested and is_stop(self._recent_user_text):
+                logger.info("live.pause stop_phrase session_id=%s", self.session_id)
+                self._pause_requested = True
+                self.stop_playback()
+                self._sleep_requested = True
             if self._on_user_transcript:
                 try:
                     self._on_user_transcript(frag)
@@ -679,6 +702,8 @@ class LiveVoiceSession:
                 return
             frag = _event_attr(event, "delta") or ""
             self._output_buf += frag
+            if self._conversation is not None:
+                self._conversation.add("assistant", frag)
             self._recent_assistant_text = (self._recent_assistant_text + frag)[-_ECHO_CONTEXT_CHARS:]
             return
         if etype == "session.delegation.created":

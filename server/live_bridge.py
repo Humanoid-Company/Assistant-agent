@@ -17,6 +17,7 @@ from typing import Any
 from openai import AsyncOpenAI
 
 from tools.executor import ToolExecutionContext, ToolExecutor
+from voice.conversation import ConversationLog
 from voice.delegation import extract_completed_function_call
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ class SidebandToolBridge:
         executor: ToolExecutor,
         on_closed: Callable[[SidebandToolBridge], None] | None = None,
         max_duration_s: float | None = None,
+        conversation: ConversationLog | None = None,
     ) -> None:
         self._client = client
         self.session_id = session_id
@@ -50,6 +52,11 @@ class SidebandToolBridge:
         self._user_turns: list[str] = []
         self._input_buf = ""
         self.end_requested = False
+        self._conversation = conversation
+        # Set by change_voice: close the session once the model has said its one-line
+        # confirmation, so the page reconnects with the new voice (Live voices are fixed per session).
+        self.close_after_reply = False
+        self._last_output_at = 0.0
 
     async def run(self) -> None:
         expiry: asyncio.Task | None = None
@@ -88,6 +95,27 @@ class SidebandToolBridge:
             content=text, delegation_id=None, event_id=f"comment_{uuid.uuid4().hex[:8]}"
         )
 
+    async def append_instruction(self, text: str) -> None:
+        """Steer the running session (e.g. new speed/style) — takes effect from the next sentence."""
+        if not self.is_open or not text:
+            return
+        await self._connection.session.instructions.append(
+            content=text, delegation_id=None, event_id=f"instr_{uuid.uuid4().hex[:8]}"
+        )
+
+    async def _close_when_reply_done(self, *, quiet_s: float = 1.2, max_wait_s: float = 10.0) -> None:
+        """Close once the model's last words have been streamed (no output for quiet_s)."""
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        while self.is_open and loop.time() - started < max_wait_s:
+            await asyncio.sleep(0.2)
+            spoke = self._last_output_at > started
+            if spoke and loop.time() - self._last_output_at >= quiet_s:
+                # The transcript leads the audio slightly: give playback a moment to finish.
+                await asyncio.sleep(1.5)
+                break
+        await self.close()
+
     async def _expire_after(self, seconds: float) -> None:
         """Cost cap: a call nobody ended (tab left open, browser crashed) is closed server-side."""
         await asyncio.sleep(seconds)
@@ -104,12 +132,20 @@ class SidebandToolBridge:
     async def _handle_event(self, event: Any) -> None:
         etype = _attr(event, "type")
         if etype == "session.input_transcript.delta":
-            self._input_buf += _attr(event, "delta") or ""
+            delta = _attr(event, "delta") or ""
+            self._input_buf += delta
+            if self._conversation is not None:
+                self._conversation.add("user", delta)
             return
-        if etype == "session.output_transcript.delta" and self._input_buf.strip():
-            # The model started answering → the user's turn is complete.
-            self._user_turns = (self._user_turns + [self._input_buf.strip()])[-20:]
-            self._input_buf = ""
+        if etype == "session.output_transcript.delta":
+            delta = _attr(event, "delta") or ""
+            self._last_output_at = asyncio.get_running_loop().time()
+            if self._conversation is not None:
+                self._conversation.add("assistant", delta)
+            if self._input_buf.strip():
+                # The model started answering → the user's turn is complete.
+                self._user_turns = (self._user_turns + [self._input_buf.strip()])[-20:]
+                self._input_buf = ""
             return
         if etype == "error":
             logger.error("web.live.error session_id=%s detail=%s", self.session_id, _attr(event, "error") or event)
@@ -191,3 +227,6 @@ class SidebandToolBridge:
                 return  # continue only once every call of this response has a result
         if self.is_open:
             await self._connection.response.create(event_id=f"continue_{call_id}")
+        if self.close_after_reply and self.is_open:
+            self.close_after_reply = False
+            await self._close_when_reply_done()

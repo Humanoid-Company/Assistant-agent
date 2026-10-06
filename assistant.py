@@ -34,7 +34,6 @@ from config import (
     GOOGLE_CALENDAR_TIMEZONE,
     GOOGLE_OAUTH_CLIENT_SECRETS_FILE,
     SYSTEM_PROMPT,
-    TRIGGER_PHRASES,
     VOICE_ENGINE,
     WEB_SEARCH_MAX_CALLS_PER_TURN,
 )
@@ -63,11 +62,13 @@ from tools.router_bridge import (  # noqa: F401  (several are re-exported for te
 from tools.task_context import TaskRevisionTracker
 from tools.web_search_tool import web_search_tool_result
 from voice.base import State
+from voice.conversation import ConversationLog
 from voice.factory import normalize_voice_engine
 from voice.live_driver import LiveDriverMixin
 from voice.live_session import LiveVoiceSession
 from voice.options import LANGUAGE_OPTIONS, VOICE_OPTIONS
 from voice.realtime_driver import RealtimeDriverMixin
+from voice.wake_phrases import match_wake
 
 _MEMORY_FILE = Path(__file__).parent / "assistant_memory.json"
 
@@ -125,6 +126,10 @@ class Assistant(RealtimeDriverMixin, LiveDriverMixin):
         # Conversation history for the current run only — carries over between
         # sleep/wake cycles (in-memory), but resets when the process restarts.
         self._history: list[dict] = []
+        # Live: the same history, independent of the voice session — a voice change or a wake
+        # after «Дякую, Єва» starts a new Live session that is seeded with it.
+        self._conversation = ConversationLog()
+        self._wake_request: str = ""
 
         # Long-term memory (persists between sessions)
         self._memory: dict = self._load_memory()
@@ -157,6 +162,7 @@ class Assistant(RealtimeDriverMixin, LiveDriverMixin):
         # Fast local memory/state updates can stay on the Live loop.
         executor.register("set_assistant_name", self._live_set_name, run_in_thread=False)
         executor.register("change_voice", self._live_change_voice, run_in_thread=False)
+        executor.register("set_voice_style", self._live_set_voice_style, run_in_thread=False)
         executor.register("change_language", self._live_change_language, run_in_thread=False)
         executor.register("end_conversation", self._live_end_conversation, run_in_thread=False)
         # Blocking network / browser / hardware work must leave the Live event loop.
@@ -171,7 +177,7 @@ class Assistant(RealtimeDriverMixin, LiveDriverMixin):
         self._running = True
         logger.info("Assistant started. voice_engine=%s", self._voice_engine)
         threading.Thread(target=self._connectivity_watch_loop, daemon=True, name="connectivity-watch").start()
-        self.tts.speak("Асистент готовий. Скажіть «привіт» щоб почати.")
+        self.tts.speak("Єва готова. Скажіть «Єва, скажи», щоб почати.")
 
         while self._running:
             try:
@@ -198,8 +204,10 @@ class Assistant(RealtimeDriverMixin, LiveDriverMixin):
 
     def _handle_sleeping(self) -> None:
         text, _, _ = self.stt.listen()
-        if text and self._has_trigger(text):
+        rest = match_wake(text) if text else None
+        if rest is not None:
             logger.info("Wake phrase heard → AWAKE")
+            self._wake_request = rest  # «Єва, скажи, котра година» → the question goes to the model
             self.state = State.AWAKE
 
     def _run_awake_session(self) -> None:
@@ -347,7 +355,7 @@ class Assistant(RealtimeDriverMixin, LiveDriverMixin):
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _has_trigger(self, text: str) -> bool:
-        return any(phrase in text for phrase in TRIGGER_PHRASES)
+        return match_wake(text) is not None
 
     def _cleanup(self) -> None:
         if self.rt is not None:

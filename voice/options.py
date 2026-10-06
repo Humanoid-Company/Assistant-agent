@@ -42,7 +42,10 @@ class VoicePersona:
                 "You are a man. Always speak about yourself in the masculine grammatical gender: "
                 "«я зрозумів», «я записав», «я подивився», «я радий», «я готовий» — never the feminine forms."
             )
-        text = f"Your voice and character ({self.label}):\n{self.character}\n{gender}"
+        text = (
+            f"Your voice and character (voice preset «{self.label}» — that is only the voice's name, "
+            f"not yours):\n{self.character}\n{gender}"
+        )
         if self.samples:
             lines = "\n".join(f"- {line}" for line in self.samples)
             text += f"\nHow you sound (tone reference only — never repeat these lines verbatim):\n{lines}"
@@ -150,6 +153,30 @@ VOICE_PERSONAS: dict[str, VoicePersona] = {
         ),
     )
 }
+
+# Speed and style of delivery. GPT-Live has no speed/pitch parameter, so these are instructions
+# to the model — applied at session start and, when changed mid-call, appended live.
+SPEED_OPTIONS: dict[str, str] = {
+    "slow": "Speak noticeably slower than usual: calm, unhurried pacing with clear pauses between sentences.",
+    "normal": "Speak at your normal conversational pace.",
+    "fast": "Speak a bit faster than usual: brisk and energetic, but every word still clear.",
+}
+STYLE_OPTIONS: dict[str, str] = {
+    "calm": "Use a calm, soft, soothing delivery with gentle intonation and little excitement.",
+    "normal": "Use your normal friendly delivery.",
+    "expressive": "Use a more expressive, emotional delivery: livelier intonation, more warmth and audible reactions.",
+}
+
+
+def delivery_instruction(speed: str = "normal", style: str = "normal", *, changed: bool = False) -> str:
+    """Instruction text for the chosen speed/style ("" at session start when both are normal)."""
+    speed = speed if speed in SPEED_OPTIONS else "normal"
+    style = style if style in STYLE_OPTIONS else "normal"
+    if not changed and speed == "normal" and style == "normal":
+        return ""
+    head = "Voice settings changed by the user — apply from your next sentence on. " if changed else ""
+    return head + SPEED_OPTIONS[speed] + " " + STYLE_OPTIONS[style]
+
 
 # Unlike voice, the spoken language is just plain-text instructions + an STT
 # transcription hint — both apply live via a session.update, no reconnect

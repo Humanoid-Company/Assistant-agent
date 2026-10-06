@@ -44,7 +44,7 @@ from prompts.live_prompt import build_live_prompt
 from server.live_bridge import SidebandToolBridge
 from server.web_users import WebUser, WebUserRegistry
 from tools.live_schemas import LIVE_BACKEND_TOOLS
-from voice.options import LANGUAGE_OPTIONS, VOICE_PERSONAS
+from voice.options import LANGUAGE_OPTIONS, SPEED_OPTIONS, STYLE_OPTIONS, VOICE_PERSONAS, delivery_instruction
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)-8s] %(name)s: %(message)s")
 for noisy in ("httpx", "httpcore", "openai"):
@@ -59,7 +59,9 @@ MAX_SESSION_S = float(os.getenv("MAX_SESSION_MINUTES", "30")) * 60
 
 _WEB_NOTE = (
     "\nWeb demo: you run in a browser tab for the team to try. To connect Google the person "
-    "presses the «Підключити Google» button on the page; you will be told when the login finishes."
+    "presses the «Підключити Google» button on the page; you will be told when the login finishes. "
+    "There are no local busy cues here: before a task that takes a moment (calendar, mail, notes, "
+    "web search) say a very short acknowledgement first — «Так», «Зараз гляну», «Секунду» — vary it."
 )
 _CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9-]{16,64}$")
 _background_tasks: set[asyncio.Task] = set()
@@ -127,10 +129,14 @@ def _session_config(user: WebUser) -> dict:
     language = LANGUAGE_OPTIONS.get(user.language, LANGUAGE_OPTIONS["uk"])
     today = date.today().isoformat()
     voice = _user_voice(user)
-    return {
+    config = {
         "model": OPENAI_LIVE_MODEL,
         "instructions": build_live_prompt(
-            language_name=language, assistant_name=user.assistant_name, today=today, voice=voice
+            language_name=language,
+            assistant_name=user.assistant_name,
+            today=today,
+            voice=voice,
+            delivery=delivery_instruction(user.speed, user.style),
         )
         + _WEB_NOTE,
         "audio": {"output": {"voice": voice}},
@@ -145,16 +151,26 @@ def _session_config(user: WebUser) -> dict:
             },
         },
     }
+    # A new voice or a wake after a long pause is a new Live session: it starts from the
+    # conversation so far, so nothing said before is forgotten.
+    history = user.conversation.live_input()
+    if history:
+        config["input"] = history
+    return config
 
 
 class SessionRequest(BaseModel):
     sdp: str
-    # The page's picker choice: server state is in memory and is lost on a Render restart.
+    # The page's picker choices: server state is in memory and is lost on a Render restart.
     voice: str | None = None
+    speed: str | None = None
+    style: str | None = None
 
 
 class VoiceRequest(BaseModel):
-    voice: str
+    voice: str | None = None
+    speed: str | None = None
+    style: str | None = None
 
 
 @app.get("/healthz")
@@ -183,6 +199,11 @@ async def create_session(
     user = _user(x_client_id, x_access_code)
     if body.voice and body.voice.strip().lower() in VOICE_PERSONAS:
         user.voice = body.voice.strip().lower()
+    if body.speed in SPEED_OPTIONS:
+        user.speed = body.speed
+    if body.style in STYLE_OPTIONS:
+        user.style = body.style
+    user.reconnect_pending = False
     try:
         result = await openai_client.live.create(
             session=_session_config(user), transport={"type": "webrtc", "sdp": body.sdp}
@@ -204,6 +225,7 @@ async def create_session(
         executor=user.executor,
         on_closed=user.bridges.discard,
         max_duration_s=MAX_SESSION_S,
+        conversation=user.conversation,
     )
     user.bridges.add(bridge)
     task = asyncio.create_task(bridge.run())
@@ -231,6 +253,10 @@ def me(
         },
         "assistant_name": user.assistant_name,
         "voice": user.voice,  # None until chosen; the page keeps its own choice then
+        "speed": user.speed,
+        "style": user.style,
+        "reconnect": user.reconnect_pending,  # voice changed by voice command: page reconnects
+        "history_turns": len(user.conversation),
     }
 
 
@@ -247,17 +273,40 @@ def voices() -> dict:
 
 
 @app.post("/api/voice")
-def set_voice(
+async def set_voice(
     body: VoiceRequest,
     x_client_id: str | None = Header(default=None),
     x_access_code: str | None = Header(default=None),
 ) -> dict:
+    """Voice (applies via reconnect, done by the page) and speed/style (applied live)."""
     user = _user(x_client_id, x_access_code)
-    voice = body.voice.strip().lower()
-    if voice not in VOICE_PERSONAS:
-        raise HTTPException(status_code=400, detail="unknown_voice")
-    user.voice = voice
-    return {"voice": voice}
+    if body.voice is not None:
+        voice = body.voice.strip().lower()
+        if voice not in VOICE_PERSONAS:
+            raise HTTPException(status_code=400, detail="unknown_voice")
+        user.voice = voice
+    delivery_changed = False
+    for name, options in (("speed", SPEED_OPTIONS), ("style", STYLE_OPTIONS)):
+        value = getattr(body, name)
+        if value is None:
+            continue
+        if value not in options:
+            raise HTTPException(status_code=400, detail=f"unknown_{name}")
+        delivery_changed |= value != getattr(user, name)
+        setattr(user, name, value)
+    if delivery_changed:
+        await user.apply_delivery()
+    return {"voice": user.voice, "speed": user.speed, "style": user.style}
+
+
+@app.delete("/api/conversation")
+def clear_conversation(
+    x_client_id: str | None = Header(default=None),
+    x_access_code: str | None = Header(default=None),
+) -> dict:
+    """«Нова розмова» / another person signed in: forget the dialogue history."""
+    _user(x_client_id, x_access_code).conversation.clear()
+    return {"ok": True}
 
 
 @app.post("/api/google/disconnect")
@@ -266,6 +315,7 @@ def google_disconnect(
     x_access_code: str | None = Header(default=None),
 ) -> dict:
     user = _user(x_client_id, x_access_code)
+    user.conversation.clear()  # the next person must not inherit this conversation
     return {"message": user.router.disconnect_google().message}
 
 

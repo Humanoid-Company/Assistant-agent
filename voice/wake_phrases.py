@@ -1,0 +1,74 @@
+"""«Єва, скажи» (wake) and «Дякую, Єва» (pause) — tolerant matching of STT transcripts.
+
+Speech recognisers write the name many ways («Єва», «Єво», «Ева», «Eva», «є ва») and mangle
+short words («скажі», «кажи», «дякуєм»). The name is matched against an explicit list — fuzzy
+matching a three-letter word would also accept «два» or «нова» — and the verbs fuzzily.
+web/app.js has a JavaScript copy of these rules (EVA_*); keep the two in sync.
+"""
+from __future__ import annotations
+
+import re
+from difflib import SequenceMatcher
+
+AGENT_NAME = "Єва"
+
+# Every form of the name an STT may produce, already normalised (see _tokens). Only the forms
+# used to address her: «скажи Єві» / «я скажу Єву» talk ABOUT her and must not wake her.
+_NAME_FORMS = frozenset({
+    "єва", "єво",
+    "ева", "эва", "эво", "ево", "єфа", "ефа",
+    "eva", "evo", "eve", "yeva", "yevo", "jeva",
+})
+_WAKE_VERBS = ("скажи", "кажи", "скажіть", "скажи-но")
+_STOP_VERBS = ("дякую", "дякуємо", "дяки", "спасибі", "спасибо", "thanks", "thank")
+_MAX_GAP = 2  # words allowed between the name and the verb («Єва, ну скажи»)
+
+_WORD_RE = re.compile(r"[a-zа-яіїєґё'’-]+")
+
+
+def _tokens(text: str) -> list[str]:
+    text = (text or "").lower().replace("’", "'").replace("ё", "е")
+    words = [w.strip("'-") for w in _WORD_RE.findall(text)]
+    words = [w for w in words if w]
+    # «є ва» / «е ва»: the recogniser split the name in two.
+    merged: list[str] = []
+    for word in words:
+        if merged and merged[-1] in ("є", "е", "э") and word == "ва":
+            merged[-1] += word
+        else:
+            merged.append(word)
+    return merged
+
+
+def _is_name(word: str) -> bool:
+    return word in _NAME_FORMS
+
+
+def _like(word: str, verbs: tuple[str, ...], ratio: float = 0.75) -> bool:
+    return any(word == v or SequenceMatcher(None, word, v).ratio() >= ratio for v in verbs)
+
+
+def _name_and_verb(words: list[str], verbs: tuple[str, ...]) -> tuple[int, int] | None:
+    """Indexes (name, verb) of the first name/verb pair at most _MAX_GAP words apart."""
+    for i, word in enumerate(words):
+        if not _is_name(word):
+            continue
+        lo, hi = max(0, i - _MAX_GAP - 1), min(len(words), i + _MAX_GAP + 2)
+        for j in range(lo, hi):
+            if j != i and _like(words[j], verbs):
+                return i, j
+    return None
+
+
+def match_wake(text: str) -> str | None:
+    """«Єва, скажи …» → what was said after the wake phrase ("" if nothing); None if absent."""
+    words = _tokens(text)
+    pair = _name_and_verb(words, _WAKE_VERBS)
+    if pair is None:
+        return None
+    return " ".join(words[max(pair) + 1:])
+
+
+def is_stop(text: str) -> bool:
+    """«Дякую, Єва» / «Єво, дякую» / «дякую Єва» in the text."""
+    return _name_and_verb(_tokens(text), _STOP_VERBS) is not None

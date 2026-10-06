@@ -9,6 +9,7 @@ users connect Google again. Fine for team testing; use a database for anything l
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import tempfile
 import threading
@@ -29,13 +30,22 @@ from tools.notes_tools import NotesToolWrappers
 from tools.results import ToolResult, agent_result_to_tool_result
 from tools.task_context import TaskRevisionTracker
 from tools.web_search_tool import web_search_tool_result
-from voice.options import LANGUAGE_OPTIONS, VOICE_PERSONAS, _sanitize_name
+from voice.conversation import ConversationLog
+from voice.options import (
+    LANGUAGE_OPTIONS,
+    SPEED_OPTIONS,
+    STYLE_OPTIONS,
+    VOICE_PERSONAS,
+    _sanitize_name,
+    delivery_instruction,
+)
 
 logger = logging.getLogger(__name__)
 
 _STATE_DIR = Path(tempfile.gettempdir()) / "voice-agent-web"
 _MAX_USERS = 500
 _IDLE_EVICT_S = 24 * 3600
+_background: set[asyncio.Task] = set()
 
 _CONNECT_ON_PAGE = (
     "Щоб підключити Google, натисніть на сторінці кнопку «Підключити Google». Відкриється вікно "
@@ -52,8 +62,24 @@ class WebUser:
     assistant_name: str | None = None
     language: str = "uk"
     voice: str | None = None
+    speed: str = "normal"
+    style: str = "normal"
+    # The voice was changed during a call: the page reconnects with the new voice and the same
+    # conversation once the current session closes.
+    reconnect_pending: bool = False
+    # Dialogue history independent of the Live session (and so of the voice).
+    conversation: ConversationLog = field(default_factory=ConversationLog)
     last_seen: float = field(default_factory=time.time)
     bridges: set[Any] = field(default_factory=set)  # live SidebandToolBridge objects
+
+    async def apply_delivery(self) -> None:
+        """Push the current speed/style into the running call."""
+        text = delivery_instruction(self.speed, self.style, changed=True)
+        for bridge in list(self.bridges):
+            try:
+                await bridge.append_instruction(text)
+            except Exception:
+                logger.debug("apply_delivery failed", exc_info=True)
 
     def __post_init__(self) -> None:
         self.executor = _build_executor(self)
@@ -111,15 +137,31 @@ def _build_executor(user: WebUser) -> ToolExecutor:
         if voice not in VOICE_PERSONAS:
             names = ", ".join(f"{p.label} ({p.voice})" for p in VOICE_PERSONAS.values())
             return ToolResult(ok=False, status="needs_more_info", message=f"Такого голосу немає. Доступні: {names}.")
+        if voice == user.voice:
+            return ToolResult(ok=True, status="ok", message=f"Голос «{VOICE_PERSONAS[voice].label}» уже стоїть.")
         user.voice = voice
+        user.reconnect_pending = True
+        for bridge in list(user.bridges):
+            bridge.close_after_reply = True  # the page reconnects with the new voice and the same history
         return ToolResult(
             ok=True,
             status="ok",
             message=(
-                f"Голос «{VOICE_PERSONAS[voice].label}» увімкнеться з наступної розмови — "
-                "натисніть «Завершити» і почніть знову."
+                f"Перемикаю на голос «{VOICE_PERSONAS[voice].label}». Скажи одним коротким реченням, що "
+                "зараз переключишся, — за секунду розмова продовжиться новим голосом з усією пам'яттю."
             ),
         )
+
+    def set_voice_style(args: dict, ctx: ToolExecutionContext) -> ToolResult:
+        speed = str(args.get("speed") or user.speed).strip().lower()
+        style = str(args.get("style") or user.style).strip().lower()
+        if speed not in SPEED_OPTIONS or style not in STYLE_OPTIONS:
+            return ToolResult(ok=False, status="needs_more_info", message="Темп: slow/normal/fast, стиль: calm/normal/expressive.")
+        user.speed, user.style = speed, style
+        task = asyncio.get_running_loop().create_task(user.apply_delivery())
+        _background.add(task)
+        task.add_done_callback(_background.discard)
+        return ToolResult(ok=True, status="ok", message="Готово, говорю так з наступного речення.")
 
     def end_conversation(args: dict, ctx: ToolExecutionContext) -> ToolResult:
         return ToolResult(ok=True, status="ok", message="Попрощайся коротко.")
@@ -130,6 +172,7 @@ def _build_executor(user: WebUser) -> ToolExecutor:
     executor.register("set_assistant_name", set_name)
     executor.register("change_language", change_language)
     executor.register("change_voice", change_voice)
+    executor.register("set_voice_style", set_voice_style)
     executor.register("end_conversation", end_conversation)
     return executor
 
