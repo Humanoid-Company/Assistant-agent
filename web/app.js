@@ -17,6 +17,10 @@
     store.set("va-client-id", clientId);
   }
   let accessCode = store.get("va-access-code") || "";
+  // Voice picker: the choice lives here (the server forgets it on restart) and is sent with
+  // every new call. Voice is fixed for a Live session, so a change applies from the next call.
+  let voices = [];
+  let voice = store.get("va-voice") || "";
 
   let pc = null;
   let channel = null;
@@ -395,7 +399,7 @@
       const res = await fetch(BACKEND + "/api/session", {
         method: "POST",
         headers: headers(),
-        body: JSON.stringify({ sdp: offer.sdp }),
+        body: JSON.stringify({ sdp: offer.sdp, voice: voice || undefined }),
       });
       if (my !== attempt) return;
       if (res.status === 401) {
@@ -437,6 +441,42 @@
     $("talk").classList.add("primary");
     $("talk").classList.remove("danger");
     $("talk").disabled = false;
+    refreshGoogle(); // picks up a voice the agent changed by voice during the call
+  }
+
+  function showVoice() {
+    const v = voices.find((x) => x.id === voice);
+    $("voice").value = voice;
+    $("voiceInfo").textContent = v ? v.description : "";
+  }
+
+  async function loadVoices() {
+    try {
+      const res = await fetch(BACKEND + "/api/voices");
+      if (!res.ok) return;
+      const data = await res.json();
+      voices = data.voices || [];
+      if (!voices.some((x) => x.id === voice)) voice = data.default;
+      if (!voices.some((x) => x.id === voice) && voices.length) voice = voices[0].id;
+      $("voice").replaceChildren(...voices.map((x) => new Option(x.label, x.id)));
+      $("voice").disabled = !voices.length;
+      showVoice();
+    } catch { /* backend offline: picker stays disabled */ }
+  }
+
+  async function chooseVoice(id) {
+    voice = id;
+    store.set("va-voice", id);
+    showVoice();
+    if (pc) {
+      const v = voices.find((x) => x.id === id);
+      addLine("system", "Голос «" + (v ? v.label : id) + "» увімкнеться з наступної розмови.");
+    }
+    await fetch(BACKEND + "/api/voice", {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({ voice: id }),
+    }).catch(() => {});
   }
 
   async function refreshGoogle() {
@@ -445,7 +485,13 @@
       const res = await fetch(BACKEND + "/api/me", { headers: headers() });
       if (res.status === 401) { showGate(); return; }
       if (!res.ok) return;
-      const { google } = await res.json();
+      const { google, voice: serverVoice } = await res.json();
+      // Set on the server only when chosen there (e.g. asked by voice) — adopt it then.
+      if (serverVoice && serverVoice !== voice && voices.some((x) => x.id === serverVoice)) {
+        voice = serverVoice;
+        store.set("va-voice", voice);
+        showVoice();
+      }
       onAccount(google.connected ? google.email || "" : null);
       const pill = $("googleState");
       if (!google.connected) {
@@ -503,6 +549,7 @@
     $("talk").addEventListener("click", () => (pc ? stop() : start()));
     $("googleConnect").addEventListener("click", connectGoogle);
     $("googleDisconnect").addEventListener("click", disconnectGoogle);
+    $("voice").addEventListener("change", (e) => chooseVoice(e.target.value));
     $("saveCode").addEventListener("click", () => {
       accessCode = $("code").value.trim();
       store.set("va-access-code", accessCode);
@@ -519,6 +566,7 @@
     if (cfg) {
       if (cfg.access_code_required && !accessCode) showGate();
       if (!cfg.google_login) $("googleConnect").disabled = true;
+      await loadVoices();
       refreshGoogle();
     }
     // Free Render sleeps after ~15 min without requests and forgets everyone's Google login;

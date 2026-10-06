@@ -29,7 +29,7 @@ from tools.notes_tools import NotesToolWrappers
 from tools.results import ToolResult, agent_result_to_tool_result
 from tools.task_context import TaskRevisionTracker
 from tools.web_search_tool import web_search_tool_result
-from voice.options import LANGUAGE_OPTIONS, VOICE_OPTIONS, _sanitize_name
+from voice.options import LANGUAGE_OPTIONS, VOICE_PERSONAS, _sanitize_name
 
 logger = logging.getLogger(__name__)
 
@@ -107,13 +107,18 @@ def _build_executor(user: WebUser) -> ToolExecutor:
 
     def change_voice(args: dict, ctx: ToolExecutionContext) -> ToolResult:
         voice = str(args.get("voice") or "").strip().lower()
-        if voice not in VOICE_OPTIONS:
-            return ToolResult(ok=False, status="needs_more_info", message="Такого голосу немає.")
+        # Only the voices offered in the page's picker, so the picker can always show the choice.
+        if voice not in VOICE_PERSONAS:
+            names = ", ".join(f"{p.label} ({p.voice})" for p in VOICE_PERSONAS.values())
+            return ToolResult(ok=False, status="needs_more_info", message=f"Такого голосу немає. Доступні: {names}.")
         user.voice = voice
         return ToolResult(
             ok=True,
             status="ok",
-            message="Голос зміниться з наступної розмови — натисніть «Завершити» і почніть знову.",
+            message=(
+                f"Голос «{VOICE_PERSONAS[voice].label}» увімкнеться з наступної розмови — "
+                "натисніть «Завершити» і почніть знову."
+            ),
         )
 
     def end_conversation(args: dict, ctx: ToolExecutionContext) -> ToolResult:

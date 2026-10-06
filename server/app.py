@@ -44,7 +44,7 @@ from prompts.live_prompt import build_live_prompt
 from server.live_bridge import SidebandToolBridge
 from server.web_users import WebUser, WebUserRegistry
 from tools.live_schemas import LIVE_BACKEND_TOOLS
-from voice.options import LANGUAGE_OPTIONS
+from voice.options import LANGUAGE_OPTIONS, VOICE_PERSONAS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)-8s] %(name)s: %(message)s")
 for noisy in ("httpx", "httpcore", "openai"):
@@ -119,16 +119,24 @@ def _user(client_id: str | None, access_code: str | None) -> WebUser:
     return users.get(client_id)
 
 
+def _user_voice(user: WebUser) -> str:
+    return user.voice or OPENAI_LIVE_VOICE
+
+
 def _session_config(user: WebUser) -> dict:
     language = LANGUAGE_OPTIONS.get(user.language, LANGUAGE_OPTIONS["uk"])
     today = date.today().isoformat()
+    voice = _user_voice(user)
+    persona = VOICE_PERSONAS.get(voice)
+    style = f"\nVoice style: {persona.style}" if persona else ""
     return {
         "model": OPENAI_LIVE_MODEL,
         "instructions": build_live_prompt(
             language_name=language, assistant_name=user.assistant_name, today=today
         )
-        + _WEB_NOTE,
-        "audio": {"output": {"voice": user.voice or OPENAI_LIVE_VOICE}},
+        + _WEB_NOTE
+        + style,
+        "audio": {"output": {"voice": voice}},
         "delegation": {
             "type": "responses",
             "responses": {
@@ -144,6 +152,12 @@ def _session_config(user: WebUser) -> dict:
 
 class SessionRequest(BaseModel):
     sdp: str
+    # The page's picker choice: server state is in memory and is lost on a Render restart.
+    voice: str | None = None
+
+
+class VoiceRequest(BaseModel):
+    voice: str
 
 
 @app.get("/healthz")
@@ -170,6 +184,8 @@ async def create_session(
 ) -> dict:
     """Browser SDP offer in → SDP answer out; tools run here over a sideband."""
     user = _user(x_client_id, x_access_code)
+    if body.voice and body.voice.strip().lower() in VOICE_PERSONAS:
+        user.voice = body.voice.strip().lower()
     try:
         result = await openai_client.live.create(
             session=_session_config(user), transport={"type": "webrtc", "sdp": body.sdp}
@@ -217,7 +233,33 @@ def me(
             "notes": bool(data.get("notes_ready")),
         },
         "assistant_name": user.assistant_name,
+        "voice": user.voice,  # None until chosen; the page keeps its own choice then
     }
+
+
+@app.get("/api/voices")
+def voices() -> dict:
+    """Voices for the page's picker; the chosen one applies from the next call."""
+    return {
+        "default": OPENAI_LIVE_VOICE,
+        "voices": [
+            {"id": p.voice, "label": p.label, "description": p.description} for p in VOICE_PERSONAS.values()
+        ],
+    }
+
+
+@app.post("/api/voice")
+def set_voice(
+    body: VoiceRequest,
+    x_client_id: str | None = Header(default=None),
+    x_access_code: str | None = Header(default=None),
+) -> dict:
+    user = _user(x_client_id, x_access_code)
+    voice = body.voice.strip().lower()
+    if voice not in VOICE_PERSONAS:
+        raise HTTPException(status_code=400, detail="unknown_voice")
+    user.voice = voice
+    return {"voice": voice}
 
 
 @app.post("/api/google/disconnect")

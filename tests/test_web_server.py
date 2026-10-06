@@ -197,3 +197,29 @@ def test_keeps_itself_awake_only_when_deployed(monkeypatch):
     with TestClient(web.app):
         time.sleep(0.3)
     assert pinged and set(pinged) == {"https://backend.example/healthz"}
+
+
+def test_voice_picker_lists_five_voices_and_saves_choice(client):
+    data = client.get("/api/voices").json()
+    ids = [v["id"] for v in data["voices"]]
+    assert len(ids) == 5 and data["default"] in ids
+    assert all(v["label"] and v["description"] for v in data["voices"])
+
+    headers = {"X-Client-Id": ALICE}
+    assert client.get("/api/me", headers=headers).json()["voice"] is None
+    assert client.post("/api/voice", json={"voice": "shimmer"}, headers=headers).json() == {"voice": "shimmer"}
+    assert client.get("/api/me", headers=headers).json()["voice"] == "shimmer"
+    assert client.post("/api/voice", json={"voice": "nope"}, headers=headers).status_code == 400
+
+    config = web._session_config(web.users.get(ALICE))
+    assert config["audio"]["output"]["voice"] == "shimmer"
+    assert "Voice style:" in config["instructions"]
+
+
+def test_voice_tool_accepts_only_picker_voices():
+    user = web.users.get(BOB)
+    ctx = ToolExecutionContext(session_id="s")
+    bad = asyncio.run(user.executor.execute("change_voice", {"voice": "echo"}, ctx))
+    assert not bad.ok and user.voice is None
+    ok = asyncio.run(user.executor.execute("change_voice", {"voice": "coral"}, ctx))
+    assert ok.ok and user.voice == "coral"

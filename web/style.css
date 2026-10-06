@@ -44,7 +44,7 @@ h2 { font-size: 1.05rem; margin: 0 0 8px; }
   margin-top: 16px;
 }
 .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-input {
+input, select {
   flex: 1 1 200px;
   padding: 10px 12px;
   border-radius: 10px;
@@ -53,6 +53,7 @@ input {
   color: var(--text);
   font: inherit;
 }
+select { width: 100%; cursor: pointer; }
 label { display: block; font-weight: 600; margin-bottom: 6px; }
 .btn {
   padding: 10px 16px;
