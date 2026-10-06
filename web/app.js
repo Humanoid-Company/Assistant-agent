@@ -458,7 +458,16 @@
       voices = data.voices || [];
       if (!voices.some((x) => x.id === voice)) voice = data.default;
       if (!voices.some((x) => x.id === voice) && voices.length) voice = voices[0].id;
-      $("voice").replaceChildren(...voices.map((x) => new Option(x.label, x.id)));
+      const group = (label, list) => {
+        const g = document.createElement("optgroup");
+        g.label = label;
+        g.append(...list.map((x) => new Option(x.label, x.id)));
+        return g;
+      };
+      $("voice").replaceChildren(
+        group("Жіночі", voices.filter((x) => x.feminine)),
+        group("Чоловічі", voices.filter((x) => !x.feminine)),
+      );
       $("voice").disabled = !voices.length;
       showVoice();
     } catch { /* backend offline: picker stays disabled */ }

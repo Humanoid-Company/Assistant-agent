@@ -17,7 +17,7 @@ from tools.router_bridge import _run_connectivity_checks
 from voice.base import State
 from voice.live_session import LiveVoiceSession
 from voice.mic import LiveMicCapture
-from voice.options import LANGUAGE_OPTIONS, VOICE_OPTIONS, _sanitize_name
+from voice.options import LANGUAGE_OPTIONS, LIVE_VOICE_OPTIONS, _sanitize_name
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +103,7 @@ class LiveDriverMixin:
     def _live_change_voice(self, args: dict, context: ToolExecutionContext) -> ToolResult:
         del context
         voice = str(args.get("voice", "")).strip().lower()
-        if voice not in VOICE_OPTIONS:
+        if voice not in LIVE_VOICE_OPTIONS:
             return ToolResult(
                 ok=False,
                 status="error",

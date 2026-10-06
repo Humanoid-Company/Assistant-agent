@@ -240,7 +240,8 @@ def voices() -> dict:
     return {
         "default": OPENAI_LIVE_VOICE,
         "voices": [
-            {"id": p.voice, "label": p.label, "description": p.description} for p in VOICE_PERSONAS.values()
+            {"id": p.voice, "label": p.label, "description": p.description, "feminine": p.feminine}
+            for p in VOICE_PERSONAS.values()
         ],
     }
 

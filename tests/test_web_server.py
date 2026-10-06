@@ -199,21 +199,22 @@ def test_keeps_itself_awake_only_when_deployed(monkeypatch):
     assert pinged and set(pinged) == {"https://backend.example/healthz"}
 
 
-def test_voice_picker_lists_five_voices_and_saves_choice(client):
+def test_voice_picker_lists_live_voices_and_saves_choice(client):
     data = client.get("/api/voices").json()
     ids = [v["id"] for v in data["voices"]]
-    assert len(ids) == 5 and data["default"] in ids
+    assert {"marin", "cedar", "gleam", "willow", "meridian"} <= set(ids) and data["default"] in ids
+    assert any(v["feminine"] for v in data["voices"]) and not all(v["feminine"] for v in data["voices"])
     assert all(v["label"] and v["description"] for v in data["voices"])
 
     headers = {"X-Client-Id": ALICE}
     assert client.get("/api/me", headers=headers).json()["voice"] is None
-    assert client.post("/api/voice", json={"voice": "shimmer"}, headers=headers).json() == {"voice": "shimmer"}
-    assert client.get("/api/me", headers=headers).json()["voice"] == "shimmer"
+    assert client.post("/api/voice", json={"voice": "willow"}, headers=headers).json() == {"voice": "willow"}
+    assert client.get("/api/me", headers=headers).json()["voice"] == "willow"
     assert client.post("/api/voice", json={"voice": "nope"}, headers=headers).status_code == 400
 
     config = web._session_config(web.users.get(ALICE))
-    assert config["audio"]["output"]["voice"] == "shimmer"
-    assert "Your voice and character (Шиммер)" in config["instructions"]
+    assert config["audio"]["output"]["voice"] == "willow"
+    assert "Your voice and character (Віллоу)" in config["instructions"]
     assert "feminine grammatical gender" in config["instructions"]
 
 
@@ -222,5 +223,5 @@ def test_voice_tool_accepts_only_picker_voices():
     ctx = ToolExecutionContext(session_id="s")
     bad = asyncio.run(user.executor.execute("change_voice", {"voice": "echo"}, ctx))
     assert not bad.ok and user.voice is None
-    ok = asyncio.run(user.executor.execute("change_voice", {"voice": "coral"}, ctx))
-    assert ok.ok and user.voice == "coral"
+    ok = asyncio.run(user.executor.execute("change_voice", {"voice": "gleam"}, ctx))
+    assert ok.ok and user.voice == "gleam"

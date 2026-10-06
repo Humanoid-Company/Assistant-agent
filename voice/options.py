@@ -4,13 +4,19 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-# The Realtime API only accepts these ten preset voice IDs — no custom voices,
-# no cloning. Exposed to the model as an enum (change_voice in tools/*_schemas.py) so
-# IT does the mapping from whatever the user actually said ("постав жіночий
-# голос", "хочу голос марін") to one of these — far more robust than us
-# hand-rolling a Ukrainian-phonetic-spelling lookup table for English names.
+# The legacy Realtime engine only accepts these ten preset voice IDs. Exposed to the model as
+# an enum (change_voice in tools/*_schemas.py) so IT does the mapping from whatever the user
+# actually said ("постав жіночий голос", "хочу голос марін") to one of these — far more robust
+# than hand-rolling a Ukrainian-phonetic-spelling lookup table for English names.
 VOICE_OPTIONS: tuple[str, ...] = (
     "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar",
+)
+
+# GPT-Live has twelve more, launched with gpt-live-1 (Live only — not in Realtime or the
+# speech endpoint). Native accents per OpenAI's Live docs; all of them speak any language.
+LIVE_VOICE_OPTIONS: tuple[str, ...] = VOICE_OPTIONS + (
+    "gleam", "willow", "bossa", "quartz", "delta",
+    "meridian", "stone", "vesper", "ripple", "tempo", "beacon", "cinder",
 )
 
 
@@ -18,12 +24,12 @@ VOICE_OPTIONS: tuple[str, ...] = (
 class VoicePersona:
     """One entry of the voice picker: a preset voice + the character that voices it."""
 
-    voice: str  # one of VOICE_OPTIONS — what the API actually gets
+    voice: str  # one of LIVE_VOICE_OPTIONS — what the API actually gets
     label: str
     description: str  # shown under the picker
     feminine: bool  # Ukrainian past tense agrees with the speaker: «я зрозуміла» / «я зрозумів»
     character: str  # who is speaking and how: put into the Live instructions
-    samples: tuple[str, ...]  # lines in this voice's manner (tone reference, not to be quoted)
+    samples: tuple[str, ...] = ()  # lines in this voice's manner (tone reference, not to be quoted)
 
     def instructions(self) -> str:
         if self.feminine:
@@ -36,105 +42,141 @@ class VoicePersona:
                 "You are a man. Always speak about yourself in the masculine grammatical gender: "
                 "«я зрозумів», «я записав», «я подивився», «я радий», «я готовий» — never the feminine forms."
             )
-        samples = "\n".join(f"- {line}" for line in self.samples)
-        return (
-            f"Your voice and character ({self.label}):\n{self.character}\n{gender}\n"
-            f"How you sound (tone reference only — never repeat these lines verbatim):\n{samples}"
-        )
+        text = f"Your voice and character ({self.label}):\n{self.character}\n{gender}"
+        if self.samples:
+            lines = "\n".join(f"- {line}" for line in self.samples)
+            text += f"\nHow you sound (tone reference only — never repeat these lines verbatim):\n{lines}"
+        return text
 
 
-# Voices offered in the picker, in display order. Keyed by the preset voice id, so a stored
-# voice and the change_voice tool argument stay plain voice ids.
+_F_SAMPLES = (
+    "О, дивись — завтра в тебе вільний ранок.",
+    "Ага, зрозуміла. Зараз гляну… так, о третій якраз нічого немає.",
+)
+_M_SAMPLES = (
+    "Ну, дивись. Тут є два варіанти — вибирай.",
+    "Записав. Нагадаю, не переживай.",
+)
+
+# Voices offered in the picker, in display order (women first). Keyed by the preset voice id,
+# so a stored voice and the change_voice tool argument stay plain voice ids. Coral, shimmer and
+# sage were dropped: in Ukrainian they sounded choppy and synthetic next to the Live voices.
 VOICE_PERSONAS: dict[str, VoicePersona] = {
     p.voice: p
     for p in (
+        # ── women ──
         VoicePersona(
-            voice="marin",
-            label="Марина",
-            description="Жіночий, теплий і природний. Як уважна подруга, що допомагає з справами — голос за замовчуванням.",
-            feminine=True,
-            character=(
-                "A warm woman in her late twenties who genuinely likes the person she talks to. You "
-                "smile while you speak and it is audible. Relaxed, unhurried conversational pace; your "
-                "pitch moves naturally — rises when something is nice or surprising, softens when you "
-                "reassure. You think out loud a little («м-м…», «так, зараз…») and react before you "
-                "answer («о, гарно», «ой, точно»)."
-            ),
-            samples=(
-                "О, дивись — завтра в тебе вільний ранок. Можна нарешті виспатися.",
-                "Ага, зрозуміла. Зараз гляну… так, о третій якраз нічого немає.",
-                "Ой, а цей лист, здається, важливий — від бухгалтерії.",
-            ),
+            "marin", "Марина",
+            "Жіночий, теплий і природний. Як уважна подруга, що допомагає зі справами — голос за замовчуванням.",
+            True,
+            "A warm woman in her late twenties who genuinely likes the person she talks to. You smile "
+            "while you speak and it is audible. Relaxed conversational pace; your pitch rises when "
+            "something is nice or surprising and softens when you reassure.",
+            _F_SAMPLES,
         ),
         VoicePersona(
-            voice="coral",
-            label="Корал",
-            description="Жіночий, жвавий і дружній. Енергійна, з усмішкою в голосі, говорить трохи швидше.",
-            feminine=True,
-            character=(
-                "An energetic, cheerful young woman with a playful sense of humour. You talk a bit "
-                "faster than average, with bright, bouncy intonation and big pitch movement, and you "
-                "laugh easily (a short light «ха» when something is funny). You get openly excited "
-                "about good news and tease gently. Speed up on small talk, slow down for the one "
-                "important detail."
-            ),
-            samples=(
-                "Ого, та це ж уже завтра! Ну нічого, встигаємо.",
-                "Так-так-так, зараз знайду… є! Ось воно.",
-                "Ха, третя зустріч за день? Ну ти сьогодні нарозхват.",
-            ),
+            "gleam", "Глім",
+            "Жіночий, записаний з живого голосу. Світлий, привітний і впевнений — універсальна помічниця.",
+            True,
+            "A bright, friendly, self-assured woman around thirty. Clear and easy to follow, upbeat "
+            "without being bubbly, with a light smile in the voice.",
+            _F_SAMPLES,
         ),
         VoicePersona(
-            voice="shimmer",
-            label="Шиммер",
-            description="Жіночий, м'який і спокійний. Тиха заспокійлива манера — для вечора чи довгих розмов.",
-            feminine=True,
-            character=(
-                "A calm, gentle woman with a soft, close, intimate voice — like talking quietly in the "
-                "evening. Slower pace, longer natural pauses between thoughts, lower volume, a soft "
-                "breathy warmth. You never rush and never sound excited; you make the listener feel "
-                "that everything is under control. Sentences often trail off softly instead of ending "
-                "abruptly."
-            ),
-            samples=(
-                "Добре… давай спокійно подивимося, що там на завтра.",
-                "Не хвилюйся, я все записала. Нічого не загубиться.",
-                "М-м, на вечір у тебе нічого немає. Можна просто відпочити.",
-            ),
+            "willow", "Віллоу",
+            "Жіночий, записаний з живого голосу. М'який, мелодійний і спокійний — для неспішних розмов.",
+            True,
+            "A gentle, melodic woman with a soft, calm voice. Unhurried and soothing, speaking in a "
+            "smooth continuous flow, warm and reassuring.",
+            _F_SAMPLES,
         ),
         VoicePersona(
-            voice="sage",
-            label="Сейдж",
-            description="Жіночий, зібраний і діловий. Чітко й упевнено, але з людським теплом — для роботи.",
-            feminine=True,
-            character=(
-                "A composed, confident professional woman — think a great executive assistant. Clear, "
-                "efficient and to the point, with crisp diction, but still human and friendly: a quick "
-                "warm acknowledgement, a light dry humour now and then. Few filler words. Steady pace; "
-                "you put a small stress and a brief pause before the key fact (time, name, number)."
-            ),
-            samples=(
-                "Так. На завтра дві зустрічі — о десятій і о третій.",
-                "Готово, чернетку створила. Відправляти?",
-                "Зрозуміла. Тоді перенесу на четвер — о пів на дванадцяту зручно?",
-            ),
+            "bossa", "Боса",
+            "Жіночий, записаний з живого голосу. Жвавий, емоційний і теплий — з енергією та усмішкою.",
+            True,
+            "A lively, expressive, warm woman with plenty of energy and an easy laugh. Animated "
+            "intonation, a quicker pace on small talk, openly happy about good news.",
+            _F_SAMPLES,
         ),
         VoicePersona(
-            voice="cedar",
-            label="Кедр",
-            description="Чоловічий, глибокий і впевнений. Спокійний низький голос, неквапливий, з легким гумором.",
-            feminine=False,
-            character=(
-                "A calm, grounded man in his thirties with a low, relaxed voice. Unhurried and confident, "
-                "never stiff — like a friend who is good at sorting things out. Easygoing intonation "
-                "that drops at the end of statements, occasional dry humour, a short low chuckle when "
-                "something is funny. Starts some replies with «ну», «слухай», «дивись»."
-            ),
-            samples=(
-                "Ну, дивись. Тут є два варіанти — вибирай.",
-                "Записав. Нагадаю, не переживай.",
-                "Слухай, у тебе завтра щільно — три зустрічі поспіль.",
-            ),
+            "quartz", "Кварц",
+            "Жіночий, синтезований. Чіткий, рівний і діловий — для роботи з календарем і поштою.",
+            True,
+            "A composed, professional woman — like a great executive assistant. Crisp and efficient "
+            "but friendly; a brief stress before the key fact (time, name, number).",
+            _F_SAMPLES,
+        ),
+        VoicePersona(
+            "delta", "Дельта",
+            "Жіночий, синтезований. Дружній і невимушений, трохи грайливий.",
+            True,
+            "A friendly, easygoing young woman with a playful streak. Casual and relaxed, teases "
+            "gently, laughs lightly when something is funny.",
+            _F_SAMPLES,
+        ),
+        # ── men ──
+        VoicePersona(
+            "cedar", "Кедр",
+            "Чоловічий, глибокий і впевнений. Спокійний низький голос, неквапливий, з легким гумором.",
+            False,
+            "A calm, grounded man in his thirties with a low, relaxed voice. Unhurried and confident, "
+            "never stiff — like a friend who is good at sorting things out. Occasional dry humour.",
+            _M_SAMPLES,
+        ),
+        VoicePersona(
+            "meridian", "Меридіан",
+            "Чоловічий, записаний з живого голосу. Рівний, теплий і надійний — універсальний помічник.",
+            False,
+            "A warm, steady, reliable man around thirty-five. Clear and natural, friendly and "
+            "confident, at an even conversational pace.",
+            _M_SAMPLES,
+        ),
+        VoicePersona(
+            "stone", "Стоун",
+            "Чоловічий, записаний з живого голосу. Низький, спокійний і м'який.",
+            False,
+            "A calm man with a low, soft voice. Relaxed and unhurried, gentle and reassuring, "
+            "speaking in a smooth continuous flow.",
+            _M_SAMPLES,
+        ),
+        VoicePersona(
+            "vesper", "Веспер",
+            "Чоловічий, записаний з живого голосу. Зібраний, інтелігентний, з легкою іронією.",
+            False,
+            "A composed, articulate, well-spoken man with a dry, subtle sense of humour. Precise "
+            "but never stiff.",
+            _M_SAMPLES,
+        ),
+        VoicePersona(
+            "ripple", "Ріпл",
+            "Чоловічий, записаний з живого голосу. Легкий, дружній і невимушений.",
+            False,
+            "A relaxed, friendly, laid-back man. Casual and cheerful, easy to talk to, with a light "
+            "humour.",
+            _M_SAMPLES,
+        ),
+        VoicePersona(
+            "tempo", "Темпо",
+            "Чоловічий, записаний з живого голосу. Енергійний і емоційний, говорить жваво.",
+            False,
+            "An energetic, expressive, upbeat man. Lively pace and animated intonation, openly "
+            "enthusiastic about good news.",
+            _M_SAMPLES,
+        ),
+        VoicePersona(
+            "beacon", "Бікон",
+            "Чоловічий, синтезований. Бадьорий, чіткий і позитивний.",
+            False,
+            "A bright, positive, clear-spoken man. Upbeat and encouraging, efficient and friendly.",
+            _M_SAMPLES,
+        ),
+        VoicePersona(
+            "cinder", "Сіндер",
+            "Чоловічий, синтезований. Теплий, неквапливий, трохи хрипкуватий.",
+            False,
+            "A warm, unhurried, easygoing man with a slightly husky voice. Folksy and friendly, "
+            "takes his time.",
+            _M_SAMPLES,
         ),
     )
 }
