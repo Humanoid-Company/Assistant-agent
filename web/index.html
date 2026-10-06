@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Голосовий агент</title>
+  <title>Єва — голосовий агент</title>
   <meta name="description" content="Тестова веб-версія голосового агента: календар, пошта, нотатки, пошук.">
   <link rel="stylesheet" href="style.css">
   <script src="config.js"></script>
@@ -12,8 +12,8 @@
 <body>
   <main class="wrap">
     <header>
-      <h1>Голосовий агент</h1>
-      <p class="sub">Натисніть «Почати розмову» і говоріть — як з людиною.</p>
+      <h1>Єва</h1>
+      <p class="sub">Голосова помічниця: календар, пошта, нотатки, пошук. Говоріть з нею як з людиною.</p>
     </header>
 
     <section id="gate" class="card" hidden>
@@ -30,15 +30,47 @@
         <span id="status">Не підключено</span>
       </div>
       <button id="talk" class="btn primary big">Почати розмову</button>
-      <p class="hint">Браузер попросить доступ до мікрофона.</p>
+      <div class="row">
+        <button id="resume" class="btn primary" hidden>Продовжити</button>
+        <button id="pause" class="btn ghost" hidden>Пауза</button>
+      </div>
+      <p id="wakeHint" class="hint">Скажіть «Єва, скажи», щоб почати, і «Дякую, Єва» — щоб поставити на паузу.</p>
     </section>
 
     <section class="card">
+      <h2>Голос Єви</h2>
       <label for="voice">Голос</label>
       <select id="voice" disabled>
         <option>Завантаження…</option>
       </select>
       <p id="voiceInfo" class="hint"></p>
+      <div class="row">
+        <button id="voicePreview" class="btn" disabled>▶ Прослухати</button>
+        <button id="voiceApply" class="btn primary" hidden>Застосувати</button>
+      </div>
+      <div class="settings">
+        <div>
+          <label for="speed">Темп</label>
+          <select id="speed">
+            <option value="slow">Повільніше</option>
+            <option value="normal">Звичайний</option>
+            <option value="fast">Швидше</option>
+          </select>
+        </div>
+        <div>
+          <label for="style">Манера</label>
+          <select id="style">
+            <option value="calm">Спокійна</option>
+            <option value="normal">Звичайна</option>
+            <option value="expressive">Емоційна</option>
+          </select>
+        </div>
+      </div>
+      <label for="volume">Гучність <span id="volumeValue" class="muted"></span></label>
+      <input id="volume" type="range" min="0" max="100" step="5">
+      <p class="hint">Темп, манера й гучність діють одразу, навіть посеред розмови. Новий голос — після
+        «Застосувати»: Єва продовжить ним з усією пам'яттю. Тембру й точної швидкості GPT-Live не має,
+        тож темп і манеру Єва тримає сама. Зразок звучить звичайним темпом.</p>
     </section>
 
     <section class="card">
@@ -54,7 +86,10 @@
     </section>
 
     <section class="card">
-      <h2>Розмова</h2>
+      <div class="google-head">
+        <h2>Розмова</h2>
+        <button id="newChat" class="btn ghost small-btn">Нова розмова</button>
+      </div>
       <div id="log" class="log" aria-live="polite">
         <p class="muted empty">Тут з'являтиметься текст розмови.</p>
       </div>

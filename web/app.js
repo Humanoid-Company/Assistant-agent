@@ -21,6 +21,10 @@
   // every new call. Voice is fixed for a Live session, so a change applies from the next call.
   let voices = [];
   let voice = store.get("va-voice") || "";
+  let speed = store.get("va-speed") || "normal";
+  let style = store.get("va-style") || "normal";
+  let volume = parseFloat(store.get("va-volume") || "1");
+  if (!(volume >= 0 && volume <= 1)) volume = 1;
 
   let pc = null;
   let channel = null;
@@ -30,7 +34,7 @@
   // overlap, and a single "current" bubble shredded both into word fragments.
   const openMsg = { user: null, assistant: null };
   const lastDeltaAt = { user: 0, assistant: 0 };
-  const TURN_PAUSE_MS = 1500;
+  const TURN_PAUSE_MS = 3000; // the transcript of one utterance can pause this long mid-sentence
   // Google account the current chat belongs to: undefined = not known yet.
   let chatEmail;
 
@@ -197,6 +201,100 @@
     }
   }
 
+  // ── Єва: «Єва, скажи» wakes her, «Дякую, Єва» pauses ───────────────────────────────────────
+  // Same rules as voice/wake_phrases.py — keep the two in sync (tests/test_eva_phrases.py has the
+  // cases). The name is matched against a list (fuzzy matching a 3-letter word would accept
+  // «два»), the verbs fuzzily, like Python's difflib ratio ≥ 0.75.
+  const EVA_NAME_FORMS = new Set(["єва", "єво", "ева", "эва", "эво", "ево", "єфа", "ефа", "eva", "evo", "eve", "yeva", "yevo", "jeva"]);
+  const EVA_WAKE_VERBS = ["скажи", "кажи", "скажіть", "скажи-но"];
+  const EVA_STOP_VERBS = ["дякую", "дякуємо", "дяки", "спасибі", "спасибо", "thanks", "thank"];
+  const EVA_MAX_GAP = 2;
+
+  function evaTokens(text) {
+    const lowered = String(text || "").toLowerCase().replace(/’/g, "'").replace(/ё/g, "е");
+    const words = (lowered.match(/[a-zа-яіїєґё'-]+/g) || []).map((w) => w.replace(/^['-]+|['-]+$/g, "")).filter(Boolean);
+    const merged = [];
+    for (const word of words) {
+      const last = merged[merged.length - 1];
+      if ((last === "є" || last === "е" || last === "э") && word === "ва") merged[merged.length - 1] = last + word;
+      else merged.push(word);
+    }
+    return merged;
+  }
+
+  // difflib.SequenceMatcher.ratio(): 2·matches / total length, matches = longest common blocks.
+  function matchingChars(a, b) {
+    let best = 0, ai = 0, bj = 0;
+    for (let i = 0; i < a.length; i++) {
+      for (let j = 0; j < b.length; j++) {
+        let k = 0;
+        while (i + k < a.length && j + k < b.length && a[i + k] === b[j + k]) k++;
+        if (k > best) { best = k; ai = i; bj = j; }
+      }
+    }
+    if (!best) return 0;
+    return best + matchingChars(a.slice(0, ai), b.slice(0, bj)) + matchingChars(a.slice(ai + best), b.slice(bj + best));
+  }
+  const like = (word, verbs) => verbs.some((v) => word === v || (2 * matchingChars(word, v)) / (word.length + v.length) >= 0.75);
+
+  function evaPair(words, verbs) {
+    for (let i = 0; i < words.length; i++) {
+      if (!EVA_NAME_FORMS.has(words[i])) continue;
+      const lo = Math.max(0, i - EVA_MAX_GAP - 1), hi = Math.min(words.length, i + EVA_MAX_GAP + 2);
+      for (let j = lo; j < hi; j++) if (j !== i && like(words[j], verbs)) return [i, j];
+    }
+    return null;
+  }
+
+  // «Єва, скажи …» → what was said after the phrase ("" if nothing); null if no wake phrase.
+  function matchWake(text) {
+    const words = evaTokens(text);
+    const pair = evaPair(words, EVA_WAKE_VERBS);
+    return pair ? words.slice(Math.max(pair[0], pair[1]) + 1).join(" ") : null;
+  }
+  const isStop = (text) => evaPair(evaTokens(text), EVA_STOP_VERBS) !== null;
+
+  // mode: off → connecting → waiting («Єва, скажи»; the model is muted) ⇄ active (listening /
+  // thinking / speaking); switching = reconnecting with a new voice.
+  const eva = {
+    mode: "off",
+    pending: null,
+    recentUser: "",   // rolling user transcript, for «Дякую, Єва»
+    lastUserAt: 0,
+    thinking: false,
+    thinkTimer: null,
+    pauseTimer: null,
+    recognizer: null,
+    wakeSupported: Boolean(window.SpeechRecognition || window.webkitSpeechRecognition) && params.get("wake") !== "off",
+  };
+
+  function showState() {
+    const m = eva.mode;
+    if (m === "off") return; // stop() sets its own text
+    let state;
+    if (m === "connecting") state = ["Підключаюсь…", "busy"];
+    else if (m === "switching") state = ["Перемикаю голос…", "busy"];
+    else if (m === "waiting") state = eva.wakeSupported ? ["Чекаю «Єва, скажи»", "wait"] : ["Пауза — натисніть «Продовжити»", "wait"];
+    else if (barge.audible) state = ["Говорю", "speak"];
+    else if (barge.speaking) state = ["Слухаю", "live"];
+    else if (eva.thinking) state = ["Думаю…", "think"];
+    else state = ["Слухаю — говоріть", "live"];
+    setStatus(state[0], state[1]);
+  }
+
+  function updateButtons() {
+    const on = eva.mode !== "off";
+    $("talk").textContent = on ? "Завершити" : "Почати розмову";
+    $("talk").classList.toggle("primary", !on);
+    $("talk").classList.toggle("danger", on);
+    $("talk").disabled = false;
+    $("resume").hidden = eva.mode !== "waiting";
+    $("pause").hidden = eva.mode !== "active";
+    $("wakeHint").textContent = eva.wakeSupported
+      ? "Скажіть «Єва, скажи», щоб почати, і «Дякую, Єва» — щоб поставити на паузу. Браузер попросить доступ до мікрофона."
+      : "Цей браузер не вміє слухати «Єва, скажи» (потрібен Chrome, Edge або Safari) — користуйтеся кнопками «Пауза» / «Продовжити». «Дякую, Єва» працює.";
+  }
+
   // Barge-in, like the desktop app: the Live model alone reacts slowly and keeps talking over
   // the user. Only the person at the mic counts ("near" voice — background talk, a TV, bangs
   // don't): their voice over the assistant ducks it a little; a stop word or real words from
@@ -221,11 +319,14 @@
     barge.timers = [];
   }
 
-  function setRemoteVolume(volume) {
+  // level: barge-in ducking (1 / 0.5 / 0) × the user's volume; silent while Єва is paused.
+  function setRemoteVolume(level) {
     const el = $("remote");
-    el.volume = volume;
-    el.muted = volume === 0;
+    const v = eva.mode === "waiting" ? 0 : level * volume;
+    el.volume = v;
+    el.muted = v === 0;
   }
+  const bargeLevel = () => (barge.stage === "muted" ? 0 : barge.stage === "ducked" ? 0.5 : 1);
 
   function bargeReset() {
     bargeClear();
@@ -241,6 +342,7 @@
     const content = {
       ack: "Stop your previous answer immediately. Do not continue or resume it. Reply with at most one short acknowledgement such as «Добре.» Then wait silently for the user.",
       stop: "Stop speaking immediately. The user is talking. Do not finish or resume your previous sentence. Listen and answer what they say.",
+      pause: "The user said «Дякую, Єва»: stop speaking immediately and stay completely silent. Do not reply to it. You will be woken again later — then continue with full memory of this conversation.",
     }[kind];
     try {
       if (channel && channel.readyState === "open") {
@@ -280,6 +382,12 @@
   }
 
   function onGateSignal(signal) {
+    bargeOnGate(signal);
+    if (barge.audible) eva.thinking = false;
+    showState();
+  }
+
+  function bargeOnGate(signal) {
     if ("audible" in signal) {
       barge.audible = signal.audible;
       if (barge.stage === "muted") scheduleRelease();
@@ -331,20 +439,31 @@
     try { event = JSON.parse(raw); } catch { return; }
     switch (event.type) {
       case "session.started":
-        setStatus("Слухаю — говоріть", "live");
+        applyStart();
         break;
       case "session.input_transcript.delta":
+        if (eva.mode === "waiting") break;
         appendTranscript("user", event.delta);
+        eva.lastUserAt = Date.now();
+        eva.recentUser = (eva.recentUser + event.delta).slice(-80);
+        // «Дякую, Єва» — also while she is talking: cut her off and pause.
+        if (isStop(eva.recentUser)) { pauseEva(); break; }
+        eva.thinking = true;
+        clearTimeout(eva.thinkTimer);
+        eva.thinkTimer = setTimeout(() => { eva.thinking = false; showState(); }, 15000);
         bargeOnWords(event.delta);
         touchActivity();
+        showState();
         break;
       case "session.output_transcript.delta":
+        if (eva.mode === "waiting") break; // whatever she says to «Дякую, Єва» is not played
         appendTranscript("assistant", event.delta);
         bargeOnAssistantText(event.delta);
+        eva.thinking = false;
         touchActivity();
         break;
       case "session.closed":
-        stop("Розмову завершено");
+        onSessionClosed();
         break;
       case "error":
         addLine("system", "Помилка: " + ((event.error && event.error.message) || "невідома"));
@@ -354,31 +473,51 @@
     }
   }
 
-  // Every start() gets a number; a stop() (or a newer start) makes the old one stale, so an
+  // Every start() gets a number; a teardown (or a newer start) makes the old one stale, so an
   // attempt that is still awaiting the mic / backend never touches the new call's state.
   let attempt = 0;
   let dropTimer = null;
   let idleTimer = null;
-  // A forgotten open call keeps billing: end it after this long with nobody speaking.
+  // A forgotten open call keeps billing: after this long with nobody speaking Єва pauses…
   const IDLE_LIMIT_MS = 5 * 60 * 1000;
+  // …and a pause this long closes the Live session; «Єва, скажи» reopens it with the history.
+  const PAUSE_CLOSE_MS = 5 * 60 * 1000;
 
   function touchActivity() {
     clearTimeout(idleTimer);
-    if (!pc) return;
+    if (!pc || eva.mode !== "active") return;
     idleTimer = setTimeout(() => {
-      addLine("system", "Тиша вже 5 хвилин — розмову завершено, щоб не витрачати хвилини.");
-      stop("Розмову завершено");
+      if (eva.mode !== "active") return;
+      addLine("system", "Тиша вже 5 хвилин — ставлю Єву на паузу, щоб не витрачати хвилини.");
+      pauseEva();
     }, IDLE_LIMIT_MS);
   }
 
-  async function start() {
+  function sendEvent(event) {
+    try {
+      if (channel && channel.readyState === "open") { channel.send(JSON.stringify(event)); return true; }
+    } catch { /* channel closing */ }
+    return false;
+  }
+  const eventId = (prefix) => prefix + "_" + Math.random().toString(16).slice(2, 10);
+  // Context the model acts on right away (it answers it out loud).
+  const commentary = (content) =>
+    sendEvent({ type: "session.commentary.append", content, delegation_id: null, event_id: eventId("say") });
+
+  const defaultStart = () => (eva.wakeSupported ? { paused: true } : { greet: true });
+
+  // opts: paused — connect and wait for «Єва, скажи»; say — tell the model this once started;
+  // greet — a short «Слухаю» unless the user starts talking; switched — first words in a new voice.
+  async function start(opts = {}) {
     if (!BACKEND) {
       addLine("system", "Не вказано адресу бекенду (web/config.js або ?backend=…).");
       return;
     }
     const my = ++attempt;
-    $("talk").disabled = true;
-    setStatus("Підключаюсь…", "busy");
+    eva.pending = opts;
+    if (eva.mode !== "switching") eva.mode = "connecting";
+    showState();
+    updateButtons();
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         // Browser echo cancellation keeps the agent from hearing (and interrupting) itself.
@@ -401,7 +540,7 @@
         else if (state === "disconnected") {
           setStatus("Зв'язок перервався — відновлюю…", "busy");
           dropTimer = setTimeout(() => { if (pc === peer) stop("З'єднання втрачено", "err"); }, 8000);
-        } else if (state === "connected") setStatus("Слухаю — говоріть", "live");
+        } else if (state === "connected") showState();
       };
       const newGate = await createNoiseGate(mic, onGateSignal);
       if (my !== attempt) { if (newGate) newGate.close(); return; }
@@ -416,7 +555,7 @@
       const res = await fetch(BACKEND + "/api/session", {
         method: "POST",
         headers: headers(),
-        body: JSON.stringify({ sdp: offer.sdp, voice: voice || undefined }),
+        body: JSON.stringify({ sdp: offer.sdp, voice: voice || undefined, speed, style }),
       });
       if (my !== attempt) return;
       if (res.status === 401) {
@@ -427,12 +566,6 @@
       const { sdp } = await res.json();
       if (my !== attempt) return;
       await peer.setRemoteDescription({ type: "answer", sdp });
-      setStatus("З'єднуюсь…", "busy");
-      $("talk").textContent = "Завершити";
-      $("talk").classList.remove("primary");
-      $("talk").classList.add("danger");
-      $("talk").disabled = false;
-      touchActivity();
     } catch (err) {
       if (my !== attempt) return;
       const msg = err && err.name === "NotAllowedError" ? "Немає доступу до мікрофона" : (err.message || String(err));
@@ -441,11 +574,32 @@
     }
   }
 
-  function stop(text = "Не підключено", state = "") {
+  // session.started: the call is up — pause, or talk.
+  function applyStart() {
+    const opts = eva.pending || {};
+    eva.pending = null;
+    if (opts.paused) { enterPause(false); return; }
+    eva.mode = "active";
+    setRemoteVolume(1);
+    startPhraseListener();
+    if (opts.switched) {
+      commentary("Your voice was just changed at the user's request. In one short sentence, in the new voice, say it is done, then continue the conversation where it was.");
+    } else if (opts.say) {
+      commentary(opts.say);
+    } else if (opts.greet) {
+      greetIfQuiet();
+    }
+    showState();
+    updateButtons();
+    touchActivity();
+  }
+
+  // Close the call but keep Єва's mode (pause, voice switch); stop() also turns her off.
+  function teardown() {
     attempt += 1;
     clearTimeout(dropTimer);
     clearTimeout(idleTimer);
-    try { if (channel && channel.readyState === "open") channel.send(JSON.stringify({ type: "session.close" })); } catch { /* ignore */ }
+    sendEvent({ type: "session.close" });
     if (pc) { pc.close(); pc = null; }
     if (gate) { gate.close(); gate = null; }
     if (mic) { mic.getTracks().forEach((t) => t.stop()); mic = null; }
@@ -453,18 +607,175 @@
     closeBubbles();
     bargeReset();
     barge.recentAssistant = "";
+  }
+
+  function stop(text = "Не підключено", state = "") {
+    teardown();
+    stopPhraseListener();
+    clearTimeout(eva.pauseTimer);
+    eva.mode = "off";
+    eva.pending = null;
     setStatus(text, state);
-    $("talk").textContent = "Почати розмову";
-    $("talk").classList.add("primary");
-    $("talk").classList.remove("danger");
-    $("talk").disabled = false;
+    updateButtons();
     refreshGoogle(); // picks up a voice the agent changed by voice during the call
   }
 
-  function showVoice() {
-    const v = voices.find((x) => x.id === voice);
-    $("voice").value = voice;
-    $("voiceInfo").textContent = v ? v.description : "";
+  // ── pause («Дякую, Єва») / wake («Єва, скажи») ──
+  function enterPause(announce) {
+    eva.mode = "waiting";
+    eva.recentUser = "";
+    eva.thinking = false;
+    clearTimeout(idleTimer);
+    sendEvent({ type: "session.input_audio.mute", event_id: eventId("mute") }); // the model hears nothing
+    bargeReset(); // and nothing it says is played while waiting (see setRemoteVolume)
+    closeBubbles();
+    if (announce) {
+      addLine("system", eva.wakeSupported
+        ? "Пауза. Скажіть «Єва, скажи», щоб продовжити — Єва все пам'ятає."
+        : "Пауза. Натисніть «Продовжити» — Єва все пам'ятає.");
+    }
+    clearTimeout(eva.pauseTimer);
+    eva.pauseTimer = setTimeout(() => { if (eva.mode === "waiting" && pc) teardown(); }, PAUSE_CLOSE_MS);
+    startPhraseListener();
+    showState();
+    updateButtons();
+  }
+
+  function pauseEva() {
+    if (eva.mode !== "active") return; // both recognisers may report the same «Дякую, Єва»
+    steer("pause");
+    enterPause(true);
+  }
+
+  function wakeEva(rest) {
+    if (eva.mode !== "waiting") return;
+    clearTimeout(eva.pauseTimer);
+    // The model was muted and never heard the phrase: hand it what followed «Єва, скажи».
+    const say = rest ? "The user just said to you: «" + rest + "». Answer it." : "";
+    if (rest) addLine("user", "Єва, скажи, " + rest);
+    if (pc && channel && channel.readyState === "open") {
+      eva.mode = "active";
+      sendEvent({ type: "session.input_audio.unmute", event_id: eventId("unmute") });
+      setRemoteVolume(1);
+      if (say) commentary(say); else greetIfQuiet();
+      showState();
+      updateButtons();
+      touchActivity();
+    } else {
+      start({ say, greet: !say }); // the pause closed the call: reopen it with the history
+    }
+  }
+
+  function greetIfQuiet() {
+    const wokeAt = Date.now();
+    setTimeout(() => {
+      if (eva.mode === "active" && !barge.speaking && !barge.audible && eva.lastUserAt < wokeAt) {
+        commentary("The user woke you with «Єва, скажи». Say only a very short «Слухаю» and wait.");
+      }
+    }, 1200);
+  }
+
+  // The browser's own recogniser (free; Chrome, Edge, Safari) runs the whole time Єва is on: it
+  // hears «Єва, скажи» while the model is muted, and «Дякую, Єва» during the conversation too —
+  // a second pair of ears, as GPT-Live's transcript sometimes drops the name («Дякую»). It stops
+  // by itself after a while of silence, so it is restarted.
+  function startPhraseListener() {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR || !eva.wakeSupported || eva.recognizer) return;
+    let rec;
+    try { rec = new SR(); } catch { eva.wakeSupported = false; showState(); updateButtons(); return; }
+    rec.lang = "uk-UA";
+    rec.continuous = true;
+    rec.interimResults = true; // «Дякую, Єва» cuts her off as soon as it is heard
+    rec.maxAlternatives = 3;
+    let retryMs = 300;
+    rec.onresult = (e) => {
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const result = e.results[i];
+        for (let k = 0; k < result.length; k++) {
+          const text = result[k].transcript;
+          if (eva.mode === "active" && isStop(text)) { pauseEva(); return; }
+          // Wake on the final text only: it carries the whole request after «Єва, скажи».
+          if (eva.mode === "waiting" && result.isFinal) {
+            const rest = matchWake(text);
+            if (rest !== null) { wakeEva(rest); return; }
+          }
+        }
+      }
+    };
+    rec.onerror = (e) => {
+      if (["not-allowed", "service-not-allowed", "language-not-supported"].includes(e.error)) {
+        eva.wakeSupported = false;
+        addLine("system", "Браузер не дає слухати «Єва, скажи» — натискайте «Продовжити».");
+        showState();
+        updateButtons();
+      } else if (e.error === "network") {
+        retryMs = 3000;
+      }
+    };
+    rec.onend = () => {
+      if (eva.recognizer !== rec) return;
+      eva.recognizer = null;
+      if (eva.mode !== "off" && eva.wakeSupported) setTimeout(startPhraseListener, retryMs);
+    };
+    eva.recognizer = rec;
+    try { rec.start(); } catch { eva.recognizer = null; }
+  }
+
+  function stopPhraseListener() {
+    const rec = eva.recognizer;
+    eva.recognizer = null;
+    if (rec) { rec.onend = null; try { rec.abort(); } catch { /* already stopped */ } }
+  }
+
+  // GPT-Live voices are fixed per session: a new voice (or a fresh start) is a new session that
+  // the server seeds with the conversation so far, so Єва remembers everything.
+  async function restartSession(mode, opts) {
+    const paused = eva.mode === "waiting";
+    if (eva.mode === "off" || eva.mode === "connecting") return;
+    if (paused && !pc) return; // closed during a pause: the next «Єва, скажи» opens it fresh
+    clearTimeout(eva.pauseTimer);
+    teardown();
+    eva.mode = mode;
+    await start(paused ? { paused: true } : opts);
+  }
+
+  // The server closed the call: after change_voice (asked by voice) to restart it in the new
+  // voice — otherwise it really ended.
+  async function onSessionClosed() {
+    if (eva.mode === "switching" || eva.mode === "off" || eva.mode === "connecting") return;
+    const wasPaused = eva.mode === "waiting";
+    teardown();
+    eva.mode = "connecting";
+    showState();
+    let me = null;
+    try {
+      const res = await fetch(BACKEND + "/api/me", { headers: headers() });
+      if (res.ok) me = await res.json();
+    } catch { /* offline */ }
+    if (eva.mode !== "connecting") return; // the user did something meanwhile
+    if (me && me.reconnect && voices.some((x) => x.id === me.voice)) {
+      voice = me.voice;
+      store.set("va-voice", voice);
+      showVoice();
+      addLine("system", "Голос змінено на «" + voiceLabel(voice) + "».");
+      eva.mode = "switching";
+      await start(wasPaused ? { paused: true } : { switched: true });
+      return;
+    }
+    if (wasPaused) { eva.mode = "waiting"; startPhraseListener(); showState(); updateButtons(); return; }
+    stop("Розмову завершено");
+  }
+
+  // ── voice settings ──
+  const voiceLabel = (id) => (voices.find((x) => x.id === id) || { label: id }).label;
+
+  // The picker may show a voice that isn't applied yet (to listen to it first).
+  function showVoice(keepSelection = false) {
+    if (!keepSelection) $("voice").value = voice;
+    const picked = voices.find((x) => x.id === $("voice").value);
+    $("voiceInfo").textContent = picked ? picked.description : "";
+    $("voiceApply").hidden = !picked || picked.id === voice;
   }
 
   async function loadVoices() {
@@ -486,23 +797,60 @@
         group("Чоловічі", voices.filter((x) => !x.feminine)),
       );
       $("voice").disabled = !voices.length;
+      $("voicePreview").disabled = !voices.length;
       showVoice();
     } catch { /* backend offline: picker stays disabled */ }
   }
 
-  async function chooseVoice(id) {
+  async function applyVoice() {
+    const id = $("voice").value;
+    if (!voices.some((x) => x.id === id) || id === voice) return;
     voice = id;
     store.set("va-voice", id);
     showVoice();
-    if (pc) {
-      const v = voices.find((x) => x.id === id);
-      addLine("system", "Голос «" + (v ? v.label : id) + "» увімкнеться з наступної розмови.");
+    await fetch(BACKEND + "/api/voice", { method: "POST", headers: headers(), body: JSON.stringify({ voice: id }) }).catch(() => {});
+    if (eva.mode === "active" || eva.mode === "waiting") {
+      addLine("system", "Голос змінено на «" + voiceLabel(id) + "».");
+      restartSession("switching", { switched: true });
     }
-    await fetch(BACKEND + "/api/voice", {
-      method: "POST",
-      headers: headers(),
-      body: JSON.stringify({ voice: id }),
-    }).catch(() => {});
+  }
+
+  // Speed and manner are instructions to the model: the server applies them to the running call.
+  async function applyDelivery() {
+    speed = $("speed").value;
+    style = $("style").value;
+    store.set("va-speed", speed);
+    store.set("va-style", style);
+    await fetch(BACKEND + "/api/voice", { method: "POST", headers: headers(), body: JSON.stringify({ speed, style }) }).catch(() => {});
+  }
+
+  function showVolume() {
+    $("volume").value = String(Math.round(volume * 100));
+    $("volumeValue").textContent = Math.round(volume * 100) + "%";
+  }
+
+  let preview = null;
+  function stopPreview() {
+    if (preview) preview.pause();
+    preview = null;
+    $("voicePreview").textContent = "▶ Прослухати";
+  }
+  function togglePreview() {
+    if (preview) { stopPreview(); return; }
+    const audio = new Audio("samples/" + encodeURIComponent($("voice").value) + ".m4a");
+    audio.volume = volume;
+    audio.onended = stopPreview;
+    audio.onerror = () => { stopPreview(); addLine("system", "Зразок цього голосу недоступний."); };
+    preview = audio;
+    $("voicePreview").textContent = "■ Стоп";
+    audio.play().catch(stopPreview);
+  }
+
+  async function newConversation() {
+    await fetch(BACKEND + "/api/conversation", { method: "DELETE", headers: headers() }).catch(() => {});
+    clearLog();
+    addLine("system", "Нова розмова — Єва почне з чистого аркуша.");
+    restartSession("connecting", { greet: true });
   }
 
   async function refreshGoogle() {
@@ -511,13 +859,16 @@
       const res = await fetch(BACKEND + "/api/me", { headers: headers() });
       if (res.status === 401) { showGate(); return; }
       if (!res.ok) return;
-      const { google, voice: serverVoice } = await res.json();
+      const { google, voice: serverVoice, speed: serverSpeed, style: serverStyle } = await res.json();
       // Set on the server only when chosen there (e.g. asked by voice) — adopt it then.
       if (serverVoice && serverVoice !== voice && voices.some((x) => x.id === serverVoice)) {
         voice = serverVoice;
         store.set("va-voice", voice);
         showVoice();
       }
+      // «Говори повільніше» by voice: show it (a restarted server reports "normal" — keep ours then).
+      if (serverSpeed && serverSpeed !== "normal" && serverSpeed !== speed) { speed = serverSpeed; store.set("va-speed", speed); $("speed").value = speed; }
+      if (serverStyle && serverStyle !== "normal" && serverStyle !== style) { style = serverStyle; store.set("va-style", style); $("style").value = style; }
       onAccount(google.connected ? google.email || "" : null);
       const pill = $("googleState");
       if (!google.connected) {
@@ -546,11 +897,12 @@
     const previous = chatEmail;
     chatEmail = email;
     if (previous === undefined || previous === email || previous === null) return;
-    const wasTalking = Boolean(pc);
-    if (wasTalking) stop();
+    const wasOn = eva.mode !== "off";
+    if (wasOn) stop();
     clearLog();
+    fetch(BACKEND + "/api/conversation", { method: "DELETE", headers: headers() }).catch(() => {});
     addLine("system", email ? "Новий користувач: " + email + " — нова розмова." : "Акаунт Google відключено — нова розмова.");
-    if (wasTalking) start();
+    if (wasOn) start(defaultStart());
   }
 
   function connectGoogle() {
@@ -572,10 +924,28 @@
   function showGate() { $("gate").hidden = false; $("code").focus(); }
 
   async function init() {
-    $("talk").addEventListener("click", () => (pc ? stop() : start()));
+    $("talk").addEventListener("click", () => (eva.mode === "off" ? start(defaultStart()) : stop()));
+    $("pause").addEventListener("click", pauseEva);
+    $("resume").addEventListener("click", () => wakeEva(""));
+    $("newChat").addEventListener("click", newConversation);
+    $("voice").addEventListener("change", () => { stopPreview(); showVoice(true); });
+    $("voicePreview").addEventListener("click", togglePreview);
+    $("voiceApply").addEventListener("click", applyVoice);
+    $("speed").value = speed;
+    $("style").value = style;
+    $("speed").addEventListener("change", applyDelivery);
+    $("style").addEventListener("change", applyDelivery);
+    showVolume();
+    $("volume").addEventListener("input", (e) => {
+      volume = Math.min(1, Math.max(0, Number(e.target.value) / 100));
+      store.set("va-volume", String(volume));
+      showVolume();
+      setRemoteVolume(bargeLevel());
+      if (preview) preview.volume = volume;
+    });
+    updateButtons();
     $("googleConnect").addEventListener("click", connectGoogle);
     $("googleDisconnect").addEventListener("click", disconnectGoogle);
-    $("voice").addEventListener("change", (e) => chooseVoice(e.target.value));
     $("saveCode").addEventListener("click", () => {
       accessCode = $("code").value.trim();
       store.set("va-access-code", accessCode);
@@ -586,7 +956,7 @@
       if (e.data && e.data.type === "google-login") refreshGoogle();
     });
     // Closing or leaving the tab ends the paid Live session instead of leaving it open.
-    window.addEventListener("pagehide", () => { if (pc) stop(); });
+    window.addEventListener("pagehide", () => { if (eva.mode !== "off") stop(); });
     if (!BACKEND) { addLine("system", "Не вказано адресу бекенду."); return; }
     const cfg = await wakeBackend();
     if (cfg) {

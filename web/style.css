@@ -46,6 +46,7 @@ h2 { font-size: 1.05rem; margin: 0 0 8px; }
 .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 input, select {
   flex: 1 1 200px;
+  min-width: 0;
   padding: 10px 12px;
   border-radius: 10px;
   border: 1px solid var(--line);
@@ -75,6 +76,16 @@ label { display: block; font-weight: 600; margin-bottom: 6px; }
 .dot.live { background: var(--ok); animation: pulse 1.4s infinite; }
 .dot.busy { background: var(--warn); }
 .dot.err { background: var(--err); }
+.dot.wait { background: var(--accent); }
+.dot.think { background: var(--warn); animation: pulse 0.8s infinite; }
+.dot.speak { background: var(--accent); animation: pulse 0.6s infinite; }
+.call .row { margin-top: 8px; }
+.call .row .btn { flex: 1 1 140px; }
+.settings { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 12px 0; }
+.settings select { width: 100%; }
+input[type="range"] { width: 100%; padding: 0; border: 0; background: none; accent-color: var(--accent); }
+.small-btn { padding: 4px 10px; font-size: 0.85rem; }
+.card > .row + .settings, .card > .hint + .row { margin-top: 8px; }
 @keyframes pulse { 50% { opacity: 0.35; } }
 .google-head { display: flex; justify-content: space-between; align-items: center; }
 .pill { font-size: 0.8rem; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
