@@ -116,7 +116,12 @@
         if (audible !== this.audible) { this.audible = audible; this.port.postMessage({ audible }); }
         // 0.006 ≈ quiet speech into a headset mic; the room's noise floor raises the bar.
         const echoLevel = audible ? outLevel * this.echo * 2.5 : 0;
-        const threshold = Math.max(0.006, this.floor * 4, echoLevel);
+        // Speakers leave bursts of echo that the browser's echo canceller misses; averaged into
+        // this.echo they look small, and letting them through can make the model hear itself
+        // and break off mid-sentence. So while the assistant talks keep the old 0.04 bar unless the mic plainly
+        // hears no echo at all (headphones). this.echo starts high, so "speakers" is the default.
+        const headset = this.echo < 0.05;
+        const threshold = Math.max(audible && !headset ? 0.04 : 0.006, this.floor * 4, echoLevel);
         // Learn the echo while the gate is shut (the user isn't talking over the assistant).
         if (audible && !this.open && outLevel > 0.01) {
           const ratio = level / outLevel;
