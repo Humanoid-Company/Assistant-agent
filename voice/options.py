@@ -34,12 +34,12 @@ class VoicePersona:
     def instructions(self) -> str:
         if self.feminine:
             gender = (
-                "You are a woman. Always speak about yourself in the feminine grammatical gender: "
+                "With this voice you are a woman: speak about yourself in the feminine grammatical gender: "
                 "«я зрозуміла», «я записала», «я подивилася», «я рада», «я готова» — never the masculine forms."
             )
         else:
             gender = (
-                "You are a man. Always speak about yourself in the masculine grammatical gender: "
+                "With this voice you are a man: speak about yourself in the masculine grammatical gender: "
                 "«я зрозумів», «я записав», «я подивився», «я радий», «я готовий» — never the feminine forms."
             )
         text = (
