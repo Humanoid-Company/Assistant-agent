@@ -265,7 +265,8 @@ def test_voice_change_keeps_the_conversation(client):
     assert "you are always Єва" in config["instructions"]
 
 
-def test_speed_and_style_apply_to_the_running_call(client):
+def test_speed_and_style_are_saved_and_returned_for_the_page(client):
+    """The page sends the returned instruction itself once Єва is quiet; the server only stores."""
     user = web.users.get("dave-browser-0123456789a")
     sent = []
 
@@ -277,8 +278,10 @@ def test_speed_and_style_apply_to_the_running_call(client):
     headers = {"X-Client-Id": "dave-browser-0123456789a"}
     body = client.post("/api/voice", json={"speed": "slow", "style": "calm"}, headers=headers).json()
     assert body["speed"] == "slow" and body["style"] == "calm"
-    assert len(sent) == 1 and "slower" in sent[0] and "calm" in sent[0]
-    assert "slower" in web._session_config(user)["instructions"]
+    assert "slower" in body["instruction"] and "calm" in body["instruction"] and "not a message" in body["instruction"]
+    assert sent == []  # not pushed mid-answer by the server
+    assert "slower" in web._session_config(user)["instructions"]  # a new session starts with them
+    assert client.post("/api/voice", json={"speed": "slow"}, headers=headers).json()["instruction"] == ""
     assert client.post("/api/voice", json={"speed": "warp"}, headers=headers).status_code == 400
     user.bridges.clear()
 
@@ -402,3 +405,33 @@ def test_voice_request_endpoint_and_dedup(client):
     assert result.ok and user.voice == "meridian"
     other = client.post("/api/voice-request", json={"text": "котра година?"}, headers=headers).json()
     assert other["switched"] is False
+
+
+def test_speed_change_waits_until_she_finishes_speaking():
+    """An instruction appended mid-answer derails it: it is sent once she is quiet, latest only."""
+    from server.live_bridge import SidebandToolBridge
+
+    sent: list[str] = []
+
+    class Conn:
+        class session:
+            class instructions:
+                @staticmethod
+                async def append(content, **kw):
+                    sent.append(content)
+
+    async def scenario():
+        bridge = SidebandToolBridge(client=None, session_id="s4", executor=None)
+        bridge._connection = Conn()
+        for word in ["Жила-була ", "маленька "]:
+            await bridge._handle_event({"type": "session.output_transcript.delta", "delta": word})
+        await bridge.append_instruction("slow", quiet_s=0.3)
+        await asyncio.sleep(0.1)
+        await bridge.append_instruction("calm", quiet_s=0.3)  # replaces «slow»
+        await bridge._handle_event({"type": "session.output_transcript.delta", "delta": "дівчинка."})
+        await asyncio.sleep(0.15)
+        assert sent == []  # still talking
+        await asyncio.sleep(0.5)
+        assert sent == ["calm"]
+
+    asyncio.run(scenario())

@@ -234,7 +234,13 @@ def delivery_instruction(speed: str = "normal", style: str = "normal", *, change
     style = style if style in STYLE_OPTIONS else "normal"
     if not changed and speed == "normal" and style == "normal":
         return ""
-    head = "Voice settings changed by the user — apply from your next sentence on. " if changed else ""
+    head = (
+        "Settings note, not a message from the user: the voice settings changed. Do not answer this, "
+        "do not mention it and do not interrupt or restart what you are saying — just sound like this "
+        "from your next answer on. "
+        if changed
+        else ""
+    )
     return head + SPEED_OPTIONS[speed] + " " + STYLE_OPTIONS[style]
 
 

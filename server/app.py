@@ -274,12 +274,14 @@ def voices() -> dict:
 
 
 @app.post("/api/voice")
-async def set_voice(
+def set_voice(
     body: VoiceRequest,
     x_client_id: str | None = Header(default=None),
     x_access_code: str | None = Header(default=None),
 ) -> dict:
-    """Voice (applies via reconnect, done by the page) and speed/style (applied live)."""
+    """Voice (applies via reconnect) and speed/style. Both are applied by the page: it reconnects
+    for a voice, and sends the returned speed/style instruction once Єва is quiet — the page hears
+    her audio, while an instruction that lands mid-answer derails it."""
     user = _user(x_client_id, x_access_code)
     if body.voice is not None:
         voice = body.voice.strip().lower()
@@ -295,9 +297,8 @@ async def set_voice(
             raise HTTPException(status_code=400, detail=f"unknown_{name}")
         delivery_changed |= value != getattr(user, name)
         setattr(user, name, value)
-    if delivery_changed:
-        await user.apply_delivery()
-    return {"voice": user.voice, "speed": user.speed, "style": user.style}
+    instruction = delivery_instruction(user.speed, user.style, changed=True) if delivery_changed else ""
+    return {"voice": user.voice, "speed": user.speed, "style": user.style, "instruction": instruction}
 
 
 class VoiceRequestBody(BaseModel):

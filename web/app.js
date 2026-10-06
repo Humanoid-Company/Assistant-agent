@@ -268,6 +268,7 @@
     pending: null,
     recentUser: "",   // rolling user transcript, for «Дякую, Єва»
     lastUserAt: 0,
+    lastAudibleAt: 0,
     thinking: false,
     thinkTimer: null,
     pauseTimer: null,
@@ -390,6 +391,7 @@
 
   function onGateSignal(signal) {
     bargeOnGate(signal);
+    if ("audible" in signal) eva.lastAudibleAt = Date.now(); // when she started / stopped sounding
     if (barge.audible) eva.thinking = false;
     showState();
   }
@@ -842,13 +844,44 @@
     }
   }
 
-  // Speed and manner are instructions to the model: the server applies them to the running call.
+  // Speed and manner are instructions to the model. One that arrives while she talks derails the
+  // answer (instructions.append is also how a barge-in stops her), so it waits until she has been
+  // quiet for a moment — the gate hears her real audio. A newer setting replaces a waiting one.
+  let pendingDelivery = "";
+  let deliveryTimer = null;
+  const DELIVERY_QUIET_MS = 2500;
+
   async function applyDelivery() {
     speed = $("speed").value;
     style = $("style").value;
     store.set("va-speed", speed);
     store.set("va-style", style);
-    await fetch(BACKEND + "/api/voice", { method: "POST", headers: headers(), body: JSON.stringify({ speed, style }) }).catch(() => {});
+    try {
+      const res = await fetch(BACKEND + "/api/voice", { method: "POST", headers: headers(), body: JSON.stringify({ speed, style }) });
+      const data = res.ok ? await res.json() : null;
+      if (data && data.instruction) { pendingDelivery = data.instruction; sendDeliveryWhenQuiet(); }
+    } catch { /* offline: the next session starts with these settings anyway */ }
+  }
+
+  // ?debug=1: evaDebug() in the console shows the page's state.
+  if (params.get("debug") === "1") {
+    window.evaDebug = () => ({
+      mode: eva.mode, pendingDelivery, audible: barge.audible, speaking: barge.speaking,
+      thinking: eva.thinking, quietMs: Date.now() - eva.lastAudibleAt, channel: channel && channel.readyState,
+    });
+  }
+
+  function sendDeliveryWhenQuiet() {
+    clearTimeout(deliveryTimer);
+    if (!pendingDelivery) return;
+    if (!channel || eva.mode !== "active") { pendingDelivery = ""; return; } // a new session gets them at start
+    const quietFor = Date.now() - eva.lastAudibleAt;
+    if (barge.audible || barge.speaking || eva.thinking || quietFor < DELIVERY_QUIET_MS) {
+      deliveryTimer = setTimeout(sendDeliveryWhenQuiet, 300);
+      return;
+    }
+    sendEvent({ type: "session.instructions.append", content: pendingDelivery, delegation_id: null, event_id: eventId("style") });
+    pendingDelivery = "";
   }
 
   function showVolume() {
