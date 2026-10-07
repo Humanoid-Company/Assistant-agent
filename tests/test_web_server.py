@@ -435,3 +435,34 @@ def test_speed_change_waits_until_she_finishes_speaking():
         assert sent == ["calm"]
 
     asyncio.run(scenario())
+
+
+def test_model_cannot_change_the_voice_nobody_asked_for():
+    """Prod: «Розкажи щось» → the model called change_voice on its own and the voice switched."""
+    user = web.users.get("voice-guard-0123456789")
+    user.voice, user.voice_switched_at = "gleam", 0.0
+    unasked = ToolExecutionContext(session_id="s", user_utterances=["Як твої справи", "Розкажи щось"])
+    refused = asyncio.run(user.executor.execute("change_voice", {"voice": "bossa"}, unasked))
+    assert not refused.ok and user.voice == "gleam" and not user.reconnect_pending
+    asked = ToolExecutionContext(session_id="s", user_utterances=["Розкажи щось", "Зроби чоловічий голос"])
+    done = asyncio.run(user.executor.execute("change_voice", {"voice": "meridian"}, asked))
+    assert done.ok and user.voice == "meridian" and user.reconnect_pending
+    assert "попросила модель" in user.voice_switch_note
+
+
+@pytest.mark.parametrize(
+    "utterances, expected",
+    [
+        (None, True),
+        (["Розкажи щось"], False),
+        (["Як справи", "Розкажи щось цікаве"], False),
+        (["Давай іншим голосом"], True),
+        (["Хочу Босу"], True),
+        (["зроби чоловічий"], True),
+        (["говори спокійніше"], True),
+    ],
+)
+def test_asked_for_voice_change(utterances, expected):
+    from voice.options import asked_for_voice_change
+
+    assert asked_for_voice_change(utterances) is expected

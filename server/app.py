@@ -256,6 +256,7 @@ def me(
         "speed": user.speed,
         "style": user.style,
         "reconnect": user.reconnect_pending,  # voice changed by voice command: page reconnects
+        "voice_note": user.voice_switch_note,  # why it changed (diagnostics on the page)
         "history_turns": len(user.conversation),
     }
 

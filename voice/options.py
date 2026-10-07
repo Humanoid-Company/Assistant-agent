@@ -169,6 +169,21 @@ _VOICE_NAME_STEMS: dict[str, str] = {
 }
 
 
+_VOICE_WORDS = ("голос", "voice", "чолов", "жіноч", "спокійн", "тихіш", "м'якш")
+
+
+def asked_for_voice_change(utterances: list[str] | None) -> bool:
+    """Did the user's last words mention the voice at all? The model sometimes calls change_voice on
+    its own («Розкажи щось» → a new voice); None = no transcript to judge by, so allow it."""
+    if utterances is None:
+        return True
+    text = " ".join(utterances[-2:]).lower().replace("’", "'")
+    words = re.findall(r"[a-zа-яіїєґ']+", text)
+    return any(w in text for w in _VOICE_WORDS) or any(
+        w in VOICE_PERSONAS or any(w.startswith(stem) for stem in _VOICE_NAME_STEMS) for w in words
+    )
+
+
 def voice_request_target(text: str, current: str | None) -> str | None:
     """The picker voice a «зміни голос …» request asks for; None if it isn't one or is unclear.
 

@@ -839,7 +839,7 @@
       voice = me.voice;
       store.set("va-voice", voice);
       showVoice();
-      addLine("system", "Голос змінено на «" + voiceLabel(voice) + "».");
+      addLine("system", "Голос змінено на «" + voiceLabel(voice) + "»" + (me.voice_note ? " (" + me.voice_note + ")" : "") + ".");
       eva.mode = "switching";
       await start(wasPaused ? { paused: true } : { switched: true, afterCommand: true });
       return;

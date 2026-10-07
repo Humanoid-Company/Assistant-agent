@@ -25,6 +25,7 @@ from voice.options import (
     SPEED_OPTIONS,
     STYLE_OPTIONS,
     _sanitize_name,
+    asked_for_voice_change,
     delivery_instruction,
     voice_request_target,
 )
@@ -150,8 +151,14 @@ class LiveDriverMixin:
         return ToolResult(ok=True, status="ok", message=msg)
 
     def _live_change_voice(self, args: dict, context: ToolExecutionContext) -> ToolResult:
-        del context
         voice = str(args.get("voice", "")).strip().lower()
+        if not asked_for_voice_change(context.user_utterances):
+            logger.info("live.voice.tool_refused voice=%s (user didn't mention the voice)", voice)
+            return ToolResult(
+                ok=False,
+                status="error",
+                message="Користувач не просив змінити голос — не змінюй його, просто продовжуй розмову.",
+            )
         if voice not in LIVE_VOICE_OPTIONS:
             return ToolResult(
                 ok=False,

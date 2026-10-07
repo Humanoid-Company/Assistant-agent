@@ -39,6 +39,7 @@ from voice.options import (
     VOICE_PERSONAS,
     VOICE_REQUEST_RE,
     _sanitize_name,
+    asked_for_voice_change,
     delivery_instruction,
     voice_request_target,
 )
@@ -74,6 +75,7 @@ class WebUser:
     # Several paths can act on one «зміни голос …» (browser recogniser, transcript, the model):
     # within this window after a switch the others are the same request, not a new one.
     voice_switched_at: float = 0.0
+    voice_switch_note: str = ""  # who switched it — shown on the page next to «Голос змінено»
     # Dialogue history independent of the Live session (and so of the voice).
     conversation: ConversationLog = field(default_factory=ConversationLog)
     # What people nearby said while Єва was paused — handed to her on the next wake.
@@ -92,6 +94,7 @@ class WebUser:
         match = VOICE_REQUEST_RE.search(utterance)
         heard = utterance[match.start(): match.end() + 30] if match else ""
         logger.info("web.voice.by_request %s → %s heard=%r", self.voice, voice, heard)
+        self.voice_switch_note = f"почула: «{heard.strip()}»"
         self.voice = voice
         self.reconnect_pending = True
         self.voice_switched_at = time.time()
@@ -179,6 +182,16 @@ def _build_executor(user: WebUser) -> ToolExecutor:
             return ToolResult(ok=False, status="needs_more_info", message=f"Такого голосу немає. Доступні: {names}.")
         if voice == user.voice or time.time() - user.voice_switched_at < VOICE_SWITCH_DEDUP_S:
             return ToolResult(ok=True, status="ok", message="Голос уже змінено. Нічого про це не кажи.")
+        last = (ctx.user_utterances or [""])[-1][-60:]
+        if not asked_for_voice_change(ctx.user_utterances):
+            logger.info("web.voice.tool_refused voice=%s (user didn't mention the voice)", voice)
+            return ToolResult(
+                ok=False,
+                status="error",
+                message="Користувач не просив змінити голос — не змінюй його, просто продовжуй розмову.",
+            )
+        logger.info("web.voice.by_tool %s → %s last_user=%r", user.voice, voice, last)
+        user.voice_switch_note = f"попросила модель; останнє від вас: «{last}»"
         user.voice = voice
         user.reconnect_pending = True
         user.voice_switched_at = time.time()
