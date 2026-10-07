@@ -61,6 +61,7 @@ from tools.router_bridge import (  # noqa: F401  (several are re-exported for te
 )
 from tools.task_context import TaskRevisionTracker
 from tools.web_search_tool import web_search_tool_result
+from voice.background import BackgroundLog, make_openai_summarizer
 from voice.base import State
 from voice.conversation import ConversationLog
 from voice.factory import normalize_voice_engine
@@ -131,6 +132,9 @@ class Assistant(RealtimeDriverMixin, LiveDriverMixin):
         self._conversation = ConversationLog()
         self._wake_request: str = ""
         self._wake_phrase: str = ""
+        # Paused by «Дякую, Єва» (not ended): what is said nearby is kept and handed to her on wake.
+        self._paused = False
+        self._background = BackgroundLog(self._summarize_background)
 
         # Long-term memory (persists between sessions)
         self._memory: dict = self._load_memory()
@@ -206,11 +210,20 @@ class Assistant(RealtimeDriverMixin, LiveDriverMixin):
     def _handle_sleeping(self) -> None:
         text, _, _ = self.stt.listen()
         rest = match_wake(text) if text else None
+        if rest is None and text and getattr(self, "_paused", False):
+            self._background.add(text)  # the same STT that waits for «Єва, скажи» — no extra cost
         if rest is not None:
             logger.info("Wake phrase heard → AWAKE")
             self._wake_request = rest  # «Єва, скажи, котра година» → the question goes to the model
             self._wake_phrase = text
             self.state = State.AWAKE
+
+    def _summarize_background(self, text: str) -> str:
+        from openai import OpenAI
+
+        from config import OPENAI_API_KEY, OPENAI_LIVE_BACKEND_MODEL
+
+        return make_openai_summarizer(OpenAI(api_key=OPENAI_API_KEY), OPENAI_LIVE_BACKEND_MODEL)(text)
 
     def _run_awake_session(self) -> None:
         # Token refresh + TLS to Google run while the voice session connects and greets,

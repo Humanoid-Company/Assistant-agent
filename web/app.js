@@ -282,7 +282,7 @@
     let state;
     if (m === "connecting") state = ["Підключаюсь…", "busy"];
     else if (m === "switching") state = ["Перемикаю голос…", "busy"];
-    else if (m === "waiting") state = eva.wakeSupported ? ["Чекаю «Єва, скажи»", "wait"] : ["Пауза — натисніть «Продовжити»", "wait"];
+    else if (m === "waiting") state = eva.wakeSupported ? ["Пауза — слухаю фоном, чекаю «Єва, скажи»", "wait"] : ["Пауза — натисніть «Продовжити»", "wait"];
     else if (barge.audible) state = ["Говорю", "speak"];
     else if (barge.speaking) state = ["Слухаю", "live"];
     else if (eva.thinking) state = ["Думаю…", "think"];
@@ -622,7 +622,7 @@
     } else if (opts.say) {
       commentary(opts.say);
     } else if (opts.greet) {
-      greetIfQuiet(opts.heard);
+      greetIfQuiet(opts.heard, opts.note);
     }
     showState();
     updateButtons();
@@ -667,7 +667,7 @@
     closeBubbles();
     if (announce) {
       addLine("system", eva.wakeSupported
-        ? "Пауза. Скажіть «Єва, скажи», щоб продовжити — Єва все пам'ятає."
+        ? "Пауза. Єва слухає фоном і запам'ятовує, про що говорять поруч, — зможе нагадати. Скажіть «Єва, скажи», щоб продовжити."
         : "Пауза. Натисніть «Продовжити» — Єва все пам'ятає.");
     }
     clearTimeout(eva.pauseTimer);
@@ -683,22 +683,43 @@
     enterPause(true);
   }
 
-  function wakeEva(rest, heard = "") {
-    if (eva.mode !== "waiting") return;
+  function postOverheard(text) {
+    fetch(BACKEND + "/api/overheard", { method: "POST", headers: headers(), body: JSON.stringify({ text }) })
+      .catch(() => {});
+  }
+
+  // What she heard in the background during the pause, as a commentary ("" if nothing).
+  async function overheardNote() {
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 4000);
+      const res = await fetch(BACKEND + "/api/overheard/digest", { method: "POST", headers: headers(), signal: ctrl.signal });
+      clearTimeout(timer);
+      return res.ok ? (await res.json()).commentary || "" : "";
+    } catch { return ""; }
+  }
+
+  async function wakeEva(rest, heard = "") {
+    if (eva.mode !== "waiting" || eva.waking) return;
+    eva.waking = true;
     clearTimeout(eva.pauseTimer);
+    const note = await overheardNote();
+    eva.waking = false;
+    if (eva.mode !== "waiting") return;
     // The model was muted and never heard the phrase: hand it what followed «Єва, скажи».
-    const say = rest ? "The user just said to you: «" + rest + "». Answer it." : "";
+    const request = rest ? "The user just said to you: «" + rest + "». Answer it." : "";
+    const say = request && note ? note + "\n\n" + request : request;
     if (rest) addLine("user", "Єва, скажи, " + rest);
     if (pc && channel && channel.readyState === "open") {
       eva.mode = "active";
       sendEvent({ type: "session.input_audio.unmute", event_id: eventId("unmute") });
       setRemoteVolume(1);
-      if (say) commentary(say); else greetIfQuiet(heard);
+      if (say) commentary(say); else greetIfQuiet(heard, note);
       showState();
       updateButtons();
       touchActivity();
     } else {
-      start({ say, greet: !say, heard }); // the pause closed the call: reopen it with the history
+      start({ say, greet: !say, heard, note }); // the pause closed the call: reopen it with the history
     }
   }
 
@@ -711,14 +732,16 @@
 
   // A greeting tells the user Єва is on. Skipped only when they already went on talking (the model
   // answers that) or she is already speaking; a noise at the wrong moment just delays it a little.
-  function greetIfQuiet(heard = "") {
+  // note: what she overheard during the pause — delivered with the greeting, or alone if skipped.
+  function greetIfQuiet(heard = "", note = "") {
     const wokeAt = Date.now();
     const phrase = heard || "Єва, скажи";
     const giveUpAt = wokeAt + 4000;
     const tryGreet = () => {
-      if (eva.mode !== "active" || eva.lastUserAt > wokeAt || barge.audible) return;
+      if (eva.mode !== "active") return;
+      if (eva.lastUserAt > wokeAt || barge.audible) { if (note) commentary(note); return; }
       if (barge.speaking && Date.now() < giveUpAt) { setTimeout(tryGreet, 300); return; }
-      commentary(wakeGreeting(phrase));
+      commentary(note ? note + "\n\n" + wakeGreeting(phrase) : wakeGreeting(phrase));
     };
     setTimeout(tryGreet, 700);
   }
@@ -754,6 +777,10 @@
             const rest = matchWake(text);
             if (rest !== null) { wakeEva(rest, text.trim()); return; }
           }
+        }
+        // Paused, not switched off: what is said nearby is kept for her (voice/background.py).
+        if (eva.mode === "waiting" && result.isFinal && !isStop(result[0].transcript)) {
+          postOverheard(result[0].transcript);
         }
       }
     };

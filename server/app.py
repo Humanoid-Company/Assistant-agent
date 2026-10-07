@@ -46,6 +46,7 @@ from prompts.live_prompt import build_live_prompt
 from server.live_bridge import SidebandToolBridge
 from server.web_users import WebUser, WebUserRegistry
 from tools.live_schemas import LIVE_BACKEND_TOOLS
+from voice.background import wake_commentary
 from voice.delegation import responses_delegation
 from voice.options import LANGUAGE_OPTIONS, SPEED_OPTIONS, STYLE_OPTIONS, VOICE_PERSONAS, delivery_instruction
 
@@ -318,13 +319,45 @@ def voice_request(
     return {"switched": switched, "voice": user.voice}
 
 
+class OverheardBody(BaseModel):
+    text: str
+
+
+@app.post("/api/overheard")
+def overheard(
+    body: OverheardBody,
+    x_client_id: str | None = Header(default=None),
+    x_access_code: str | None = Header(default=None),
+) -> dict:
+    """A phrase the page's recogniser heard while Єва was paused (not addressed to her)."""
+    _user(x_client_id, x_access_code).background.add(body.text[:1000])
+    return {"ok": True}
+
+
+@app.post("/api/overheard/digest")
+def overheard_digest(
+    x_client_id: str | None = Header(default=None),
+    x_access_code: str | None = Header(default=None),
+) -> dict:
+    """On wake: the gist of the pause as a commentary for the page to send; kept in the history."""
+    user = _user(x_client_id, x_access_code)
+    note = user.background.digest()
+    if not note:
+        return {"commentary": ""}
+    user.conversation.add_note(note)
+    logger.info("web.background.digest chars=%s", len(note))
+    return {"commentary": wake_commentary(note)}
+
+
 @app.delete("/api/conversation")
 def clear_conversation(
     x_client_id: str | None = Header(default=None),
     x_access_code: str | None = Header(default=None),
 ) -> dict:
     """«Нова розмова» / another person signed in: forget the dialogue history."""
-    _user(x_client_id, x_access_code).conversation.clear()
+    user = _user(x_client_id, x_access_code)
+    user.conversation.clear()
+    user.background.clear()
     return {"ok": True}
 
 
@@ -335,6 +368,7 @@ def google_disconnect(
 ) -> dict:
     user = _user(x_client_id, x_access_code)
     user.conversation.clear()  # the next person must not inherit this conversation
+    user.background.clear()
     return {"message": user.router.disconnect_google().message}
 
 

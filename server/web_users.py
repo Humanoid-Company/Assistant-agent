@@ -30,6 +30,7 @@ from tools.notes_tools import NotesToolWrappers
 from tools.results import ToolResult, agent_result_to_tool_result
 from tools.task_context import TaskRevisionTracker
 from tools.web_search_tool import web_search_tool_result
+from voice.background import BackgroundLog, make_openai_summarizer
 from voice.conversation import ConversationLog
 from voice.options import (
     LANGUAGE_OPTIONS,
@@ -75,6 +76,8 @@ class WebUser:
     voice_switched_at: float = 0.0
     # Dialogue history independent of the Live session (and so of the voice).
     conversation: ConversationLog = field(default_factory=ConversationLog)
+    # What people nearby said while Єва was paused — handed to her on the next wake.
+    background: BackgroundLog = field(default_factory=lambda: BackgroundLog(_summarize_background))
     last_seen: float = field(default_factory=time.time)
     bridges: set[Any] = field(default_factory=set)  # live SidebandToolBridge objects
 
@@ -105,6 +108,21 @@ class WebUser:
 
     def __post_init__(self) -> None:
         self.executor = _build_executor(self)
+
+
+_summarizer = None
+
+
+def _summarize_background(text: str) -> str:
+    """Compress a long pause's overheard talk (lazy: one OpenAI client for the whole server)."""
+    global _summarizer
+    if _summarizer is None:
+        from openai import OpenAI
+
+        from config import OPENAI_API_KEY, OPENAI_LIVE_BACKEND_MODEL
+
+        _summarizer = make_openai_summarizer(OpenAI(api_key=OPENAI_API_KEY), OPENAI_LIVE_BACKEND_MODEL)
+    return _summarizer(text)
 
 
 def _build_executor(user: WebUser) -> ToolExecutor:

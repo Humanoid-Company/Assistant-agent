@@ -14,6 +14,7 @@ from prompts.live_prompt import build_live_prompt
 from tools.executor import ToolExecutionContext
 from tools.results import ToolResult, agent_result_to_tool_result
 from tools.router_bridge import _run_connectivity_checks
+from voice.background import wake_commentary
 from voice.base import State
 from voice.conversation import ConversationLog
 from voice.live_session import LiveVoiceSession
@@ -89,14 +90,21 @@ class LiveDriverMixin:
                 ),
             )
             wake_request, self._wake_request = self._wake_request, ""
+            # What she overheard during the pause goes in the same commentary as the wake reply.
+            note = self._background.digest() if getattr(self, "_paused", False) and not voice_restart else ""
+            self._paused = False
+            if note:
+                self._conversation.add_note(note)
+                logger.info("background.digest chars=%s", len(note))
+            heard = wake_commentary(note) + "\n\n" if note else ""
             if voice_restart:
                 pass  # a new voice: no announcement, she just listens on with the same memory
             elif wake_request:
-                live.speak_context(f"The user just said to you: «{wake_request}». Answer it.")
+                live.speak_context(f"{heard}The user just said to you: «{wake_request}». Answer it.")
             elif self._wake_phrase:
-                live.speak_context(WAKE_GREETING.format(phrase=self._wake_phrase))
+                live.speak_context(heard + WAKE_GREETING.format(phrase=self._wake_phrase))
             else:
-                live.speak_context("Слухаю!")
+                live.speak_context(heard + "Слухаю!")
             if alert := self._connectivity_watcher.pop_alert():
                 live.speak_context(alert)
             if pending := self._pop_deferred_announcement():
@@ -109,7 +117,8 @@ class LiveDriverMixin:
             live.stop_playback()
             # «Дякую, Єва» pauses: no goodbye, the conversation goes on after the next wake.
             if live.pause_requested:
-                logger.info("Live paused by «Дякую, Єва» — waiting for the wake phrase.")
+                self._paused = True
+                logger.info("Live paused by «Дякую, Єва» — listening in the background until the wake phrase.")
             elif not live.voice_restart_requested and not self._voice_change_pending:
                 live.speak_context("До побачення!")
                 time.sleep(1.0)

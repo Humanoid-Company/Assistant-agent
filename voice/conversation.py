@@ -41,6 +41,17 @@ class ConversationLog:
                 self._turns.append(Turn(role, delta.lstrip()))
                 del self._turns[:-_KEEP_TURNS]
 
+    def add_note(self, text: str) -> None:
+        """Context she got without anyone saying it to her (overheard during a pause). Kept as her
+        own remark, so later sessions still have it and it is never put in the user's mouth."""
+        text = (text or "").strip()
+        if not text:
+            return
+        with self._lock:
+            self._turns.append(Turn("assistant", f"(Почула фоном під час паузи: {text})"))
+            self._turns.append(Turn("boundary", ""))
+            del self._turns[:-_KEEP_TURNS]
+
     def end_turn(self) -> None:
         """Close the current turn so the next fragment of the same speaker starts a new one."""
         with self._lock:
