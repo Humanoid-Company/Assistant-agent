@@ -15,6 +15,8 @@ import logging
 import threading
 from collections.abc import Callable
 
+from voice.wake_phrases import addresses_eva
+
 logger = logging.getLogger(__name__)
 
 # ≈ 280 tokens of Cyrillic (≈ 2.7 chars/token): with the wrapper (~100 tokens) and the wake
@@ -22,7 +24,7 @@ logger = logging.getLogger(__name__)
 MAX_NOTE_CHARS = 750
 # Raw text beyond this is folded into the running summary (≈ 8 minutes of talk).
 _RAW_LIMIT_CHARS = 2400
-_MIN_WORDS = 2  # «е», «ну» and lone noise words are not worth keeping
+_MIN_WORDS = 3  # «Привіт я», «ну так» and other fragments are not worth keeping
 
 Summarize = Callable[[str], str]
 
@@ -65,8 +67,8 @@ class BackgroundLog:
 
     def add(self, text: str) -> None:
         text = " ".join((text or "").split())
-        if len(text.split()) < _MIN_WORDS:
-            return
+        if len(text.split()) < _MIN_WORDS or addresses_eva(text):
+            return  # a failed «Привіт, Єва» is the user talking to her, not people nearby
         with self._lock:
             self._raw.append(text)
             too_long = sum(len(t) + 1 for t in self._raw) > _RAW_LIMIT_CHARS

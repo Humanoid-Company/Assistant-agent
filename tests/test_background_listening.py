@@ -15,7 +15,7 @@ H = {"X-Client-Id": BOB}
 def test_digest_returns_phrases_and_clears():
     log = BackgroundLog()
     log.add("нараду перенесли на четвер")
-    log.add("ну")  # a lone noise word is not kept
+    log.add("ну так")  # fragments under three words are not kept
     log.add("в Олега в п'ятницю день народження")
     assert log.digest() == "нараду перенесли на четвер в Олега в п'ятницю день народження"
     assert log.digest() == ""
@@ -64,15 +64,31 @@ def test_commentary_fits_the_500_token_limit():
     assert MAX_NOTE_CHARS / 2.7 + (wrapper + greeting) / 4 < 470
 
 
-def test_note_stays_in_history_as_her_own_remark():
+def test_note_stays_in_history_as_a_developer_message():
+    """Prod: as her last line in a new session's history it surfaced in her first words; measured on
+    GPT-Live a developer message is recalled better («Олег казав, що нараду перенесли…»)."""
     log = ConversationLog()
     log.add("user", "Привіт")
-    log.add_note("нарада в четвер")
     log.add("assistant", "Слухаю")
+    log.add_note("нарада в четвер")
     items = log.live_input()
-    assert [i["role"] for i in items] == ["user", "assistant", "assistant"]
-    assert "нарада в четвер" in items[1]["content"][0]["text"]
-    assert items[2]["content"][0]["text"] == "Слухаю"
+    assert [i["role"] for i in items] == ["user", "assistant", "developer"]
+    assert "нарада в четвер" in items[2]["content"][0]["text"]
+    assert "not the user" in items[2]["content"][0]["text"]
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "Привіт я",  # a mangled «Привіт, Єва»: two words
+        "розкажи від Єва",  # names her: the user talking to her, not people nearby
+        "Як в тебе справи Єво",
+    ],
+)
+def test_phrases_to_eva_are_not_background(phrase):
+    log = BackgroundLog()
+    log.add(phrase)
+    assert log.digest() == ""
 
 
 @pytest.fixture()
@@ -90,6 +106,7 @@ def test_web_overheard_reaches_her_on_wake(client):
     assert "нараду з бухгалтерією перенесли на четвер" in commentary
     assert "not by the user" in commentary or "not said by the user" in commentary
     assert "нараду" in user.conversation.turns()[-1].text  # a later session still has it
+    assert user.conversation.turns()[-1].role == "note"
     assert client.post("/api/overheard/digest", headers=H).json() == {"commentary": ""}
 
 

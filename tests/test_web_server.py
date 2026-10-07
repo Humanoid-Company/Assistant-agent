@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -466,3 +467,28 @@ def test_asked_for_voice_change(utterances, expected):
     from voice.options import asked_for_voice_change
 
     assert asked_for_voice_change(utterances) is expected
+
+
+
+def test_wake_request_goes_into_the_new_call_as_the_users_message(monkeypatch):
+    """Prod: «Єва, скажи, яка в мене завтра подія» → she said «Яка в мене завтра подія?». Quoted in a
+    commentary GPT-Live sometimes reads it back (1 of 3); as the user's message in the history, 0 of 3."""
+    monkeypatch.setattr(web, "ACCESS_CODE", "")
+    captured = {}
+
+    async def fake_create(*, session, transport):
+        captured["input"] = session.get("input", [])
+        return SimpleNamespace(session=SimpleNamespace(id="sess-wake"), transport=SimpleNamespace(sdp="answer"))
+
+    monkeypatch.setattr(web.openai_client.live, "create", fake_create)
+    monkeypatch.setattr(web.SidebandToolBridge, "run", lambda self: asyncio.sleep(0))
+    user = web.users.get("wake-req-0123456789ab")
+    user.conversation.clear()
+    res = TestClient(web.app).post(
+        "/api/session",
+        headers={"X-Client-Id": "wake-req-0123456789ab"},
+        json={"sdp": "offer", "user_text": "Єва, скажи, яка в мене завтра подія"},
+    )
+    assert res.status_code == 200
+    last = captured["input"][-1]
+    assert last["role"] == "user" and "яка в мене завтра подія" in last["content"][0]["text"]

@@ -33,6 +33,12 @@ from voice.options import (
 logger = logging.getLogger(__name__)
 
 
+# Their request after the wake phrase is in the history (same wording in web/app.js).
+ANSWER_LAST = (
+    "The user woke you and asked something — it is their last message in the history. "
+    "Answer it now; do not repeat their words."
+)
+
 # Said right after a wake phrase so the user hears Єва is on (same wording in web/app.js).
 WAKE_GREETING = (
     "The user just called you: «{phrase}». You are back and listening — let them hear it. "
@@ -72,6 +78,12 @@ class LiveDriverMixin:
         )
         voice_restart = getattr(self, "_voice_restarted", False)
         self._voice_restarted = False
+        wake_request, self._wake_request = self._wake_request, ""
+        if wake_request and not voice_restart:
+            # Their request starts the new session's history as their own message: quoted in a
+            # commentary, GPT-Live sometimes read it back instead of answering.
+            self._conversation.add("user", f"Єва, скажи, {wake_request}")
+            self._conversation.end_turn()
         self._live = live
         try:
             live.connect(
@@ -90,7 +102,6 @@ class LiveDriverMixin:
                     language_name=LANGUAGE_OPTIONS.get(self._memory.get("language", "uk"), LANGUAGE_OPTIONS["uk"]),
                 ),
             )
-            wake_request, self._wake_request = self._wake_request, ""
             # What she overheard during the pause goes in the same commentary as the wake reply.
             note = self._background.digest() if getattr(self, "_paused", False) and not voice_restart else ""
             self._paused = False
@@ -101,7 +112,7 @@ class LiveDriverMixin:
             if voice_restart:
                 pass  # a new voice: no announcement, she just listens on with the same memory
             elif wake_request:
-                live.speak_context(f"{heard}The user just said to you: «{wake_request}». Answer it.")
+                live.speak_context(heard + ANSWER_LAST)
             elif self._wake_phrase:
                 live.speak_context(heard + WAKE_GREETING.format(phrase=self._wake_phrase))
             else:

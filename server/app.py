@@ -164,6 +164,9 @@ class SessionRequest(BaseModel):
     voice: str | None = None
     speed: str | None = None
     style: str | None = None
+    # What the user asked right after the wake phrase: goes into the new call's history as their
+    # own message (a quoted commentary made GPT-Live read it back).
+    user_text: str | None = None
 
 
 class VoiceRequest(BaseModel):
@@ -203,6 +206,9 @@ async def create_session(
     if body.style in STYLE_OPTIONS:
         user.style = body.style
     user.reconnect_pending = False
+    if body.user_text and body.user_text.strip():
+        user.conversation.add("user", body.user_text.strip()[:500])
+        user.conversation.end_turn()
     try:
         result = await openai_client.live.create(
             session=_session_config(user), transport={"type": "webrtc", "sdp": body.sdp}

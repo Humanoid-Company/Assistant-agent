@@ -594,7 +594,7 @@
       const res = await fetch(BACKEND + "/api/session", {
         method: "POST",
         headers: headers(),
-        body: JSON.stringify({ sdp: offer.sdp, voice: voice || undefined, speed, style }),
+        body: JSON.stringify({ sdp: offer.sdp, voice: voice || undefined, speed, style, user_text: opts.userText || undefined }),
       });
       if (my !== attempt) return;
       if (res.status === 401) {
@@ -628,6 +628,8 @@
         commentary("Your voice was just changed while you were saying: «" + opts.interrupted.slice(-500) +
           "». Continue exactly that answer in the new voice from where it stopped (its last few words may not have been heard) — do not start it over, do not mention the voice change.");
       }
+    } else if (opts.userText) {
+      Promise.resolve(opts.note).then((n) => commentary(withNote(n, ANSWER_LAST)));
     } else if (opts.request) {
       Promise.resolve(opts.note).then((n) => commentary(withNote(n, opts.request)));
     } else if (opts.say) {
@@ -755,6 +757,8 @@
   // The model was muted and never heard the phrase: hand it what followed «Єва, скажи», together
   // with what she overheard during the pause (fetched while the call connects, not before it).
   const withNote = (note, text) => (note ? note + "\n\n" + text : text);
+  const ANSWER_LAST = "The user woke you and asked something — it is their last message in the history. " +
+    "Answer it now; do not repeat their words.";
 
   function wakeEva(rest, heard = "") {
     if (eva.mode !== "waiting") return;
@@ -772,8 +776,9 @@
       updateButtons();
       touchActivity();
     } else {
-      // The pause closed the call: reopen it right away with the history.
-      start({ request, greet: !request, heard, note, fresh: true });
+      // The pause closed the call: reopen it right away. What they asked goes into the new call's
+      // history as their own message — quoted in a commentary, GPT-Live sometimes read it back.
+      start({ userText: rest ? "Єва, скажи, " + rest : "", greet: !rest, heard, note, fresh: true });
     }
   }
 
@@ -836,7 +841,9 @@
           }
         }
         // Paused, not switched off: what is said nearby is kept for her (voice/background.py).
-        if (bgListen && eva.mode === "waiting" && result.isFinal && !isStop(result[0].transcript)) {
+        // Not a phrase that names her: a wake phrase the recogniser mangled is the user, not background.
+        if (bgListen && eva.mode === "waiting" && result.isFinal && !isStop(result[0].transcript)
+            && !evaTokens(result[0].transcript).some((w) => EVA_NAME_FORMS.has(w))) {
           postOverheard(result[0].transcript);
         }
       }

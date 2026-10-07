@@ -55,14 +55,14 @@ class ConversationLog:
                 del self._turns[:-_KEEP_TURNS]
 
     def add_note(self, text: str) -> None:
-        """Context she got without anyone saying it to her (overheard during a pause). Kept as her
-        own remark, so later sessions still have it and it is never put in the user's mouth."""
+        """Context she got without anyone saying it to her (overheard during a pause), for later
+        sessions. A developer message, not her line: as the last assistant item of a new session's
+        history it surfaced in her first words, and measured on GPT-Live it was recalled worse."""
         text = (text or "").strip()
         if not text:
             return
         with self._lock:
-            self._turns.append(Turn("assistant", f"(Почула фоном під час паузи: {text})"))
-            self._turns.append(Turn("boundary", ""))
+            self._turns.append(Turn("note", text))
             del self._turns[:-_KEEP_TURNS]
 
     def add_tool_note(self, tool: str, message: str) -> None:
@@ -107,6 +107,10 @@ class ConversationLog:
         picked.reverse()
         items = []
         for turn in picked:
+            if turn.role == "note":
+                text = f"Overheard while you were paused (people nearby talking among themselves, not the user): {turn.text}"
+                items.append({"type": "message", "role": "developer", "content": [{"type": "input_text", "text": text}]})
+                continue
             part = (
                 {"type": "input_text", "text": turn.text}
                 if turn.role == "user"

@@ -68,6 +68,11 @@ def _name_and_verb(words: list[str], verbs: tuple[str, ...]) -> tuple[int, int] 
     return None
 
 
+def addresses_eva(text: str) -> bool:
+    """The text names her («Єва», «Єво», «Ева»…) — said to her or about her, not background talk."""
+    return any(_is_name(word) for word in _tokens(text))
+
+
 def match_wake(text: str) -> str | None:
     """«Єва, скажи …» / «Привіт, Єва …» → what was said after the phrase ("" if nothing); None if absent."""
     words = _tokens(text)
