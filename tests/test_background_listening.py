@@ -97,3 +97,24 @@ def test_new_conversation_forgets_the_background(client):
     client.post("/api/overheard", headers=H, json={"text": "Марек приїде двадцятого жовтня"})
     client.delete("/api/conversation", headers=H)
     assert client.post("/api/overheard/digest", headers=H).json() == {"commentary": ""}
+
+
+def test_turning_background_listening_off_forgets_what_was_heard(client):
+    client.post("/api/overheard", headers=H, json={"text": "Марек приїде двадцятого жовтня"})
+    assert client.delete("/api/overheard", headers=H).json() == {"ok": True}
+    assert client.post("/api/overheard/digest", headers=H).json() == {"commentary": ""}
+
+
+def test_browser_may_send_delete_cross_origin(client):
+    """The page lives on Vercel, the API on Render: DELETE needs CORS (it was GET/POST only, so
+    «Нова розмова» silently never cleared the server's history)."""
+    res = client.options(
+        "/api/overheard",
+        headers={
+            "Origin": "https://voice-agents-web-three.vercel.app",
+            "Access-Control-Request-Method": "DELETE",
+            "Access-Control-Request-Headers": "x-client-id,content-type",
+        },
+    )
+    assert res.status_code == 200
+    assert "DELETE" in res.headers["access-control-allow-methods"]

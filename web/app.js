@@ -24,6 +24,8 @@
   let speed = store.get("va-speed") || "normal";
   let style = store.get("va-style") || "normal";
   let volume = parseFloat(store.get("va-volume") || "1");
+  // Keep what is said nearby during a pause (voice/background.py); the user can turn it off.
+  let bgListen = store.get("va-bg-listen") !== "0";
   if (!(volume >= 0 && volume <= 1)) volume = 1;
 
   let pc = null;
@@ -282,7 +284,9 @@
     let state;
     if (m === "connecting") state = ["Підключаюсь…", "busy"];
     else if (m === "switching") state = ["Перемикаю голос…", "busy"];
-    else if (m === "waiting") state = eva.wakeSupported ? ["Пауза — слухаю фоном, чекаю «Єва, скажи»", "wait"] : ["Пауза — натисніть «Продовжити»", "wait"];
+    else if (m === "waiting") state = eva.wakeSupported
+      ? [bgListen ? "Пауза — слухаю фоном, чекаю «Єва, скажи»" : "Пауза — чекаю «Єва, скажи»", "wait"]
+      : ["Пауза — натисніть «Продовжити»", "wait"];
     else if (barge.audible) state = ["Говорю", "speak"];
     else if (barge.speaking) state = ["Слухаю", "live"];
     else if (eva.thinking) state = ["Думаю…", "think"];
@@ -667,7 +671,9 @@
     closeBubbles();
     if (announce) {
       addLine("system", eva.wakeSupported
-        ? "Пауза. Єва слухає фоном і запам'ятовує, про що говорять поруч, — зможе нагадати. Скажіть «Єва, скажи», щоб продовжити."
+        ? (bgListen
+          ? "Пауза. Єва слухає фоном і запам'ятовує, про що говорять поруч, — зможе нагадати. Скажіть «Єва, скажи», щоб продовжити."
+          : "Пауза. Скажіть «Єва, скажи», щоб продовжити — Єва все пам'ятає.")
         : "Пауза. Натисніть «Продовжити» — Єва все пам'ятає.");
     }
     clearTimeout(eva.pauseTimer);
@@ -690,6 +696,7 @@
 
   // What she heard in the background during the pause, as a commentary ("" if nothing).
   async function overheardNote() {
+    if (!bgListen) return "";
     try {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 4000);
@@ -697,6 +704,24 @@
       clearTimeout(timer);
       return res.ok ? (await res.json()).commentary || "" : "";
     } catch { return ""; }
+  }
+
+  function showBgListen() {
+    const b = $("bgListen");
+    b.setAttribute("aria-pressed", String(bgListen));
+    b.textContent = "Слухати фоном на паузі: " + (bgListen ? "увімк." : "вимк.");
+  }
+
+  function toggleBgListen() {
+    bgListen = !bgListen;
+    store.set("va-bg-listen", bgListen ? "1" : "0");
+    showBgListen();
+    showState();
+    // Turned off: forget what was already heard, it must not reach her.
+    if (!bgListen) fetch(BACKEND + "/api/overheard", { method: "DELETE", headers: headers() }).catch(() => {});
+    addLine("system", bgListen
+      ? "На паузі Єва слухатиме фоном і запам'ятовуватиме, про що говорять поруч."
+      : "Фонове слухання вимкнено: на паузі Єва нічого не запам'ятовує.");
   }
 
   async function wakeEva(rest, heard = "") {
@@ -779,7 +804,7 @@
           }
         }
         // Paused, not switched off: what is said nearby is kept for her (voice/background.py).
-        if (eva.mode === "waiting" && result.isFinal && !isStop(result[0].transcript)) {
+        if (bgListen && eva.mode === "waiting" && result.isFinal && !isStop(result[0].transcript)) {
           postOverheard(result[0].transcript);
         }
       }
@@ -1064,6 +1089,8 @@
     $("talk").addEventListener("click", () => (eva.mode === "off" ? start(defaultStart()) : stop()));
     $("pause").addEventListener("click", pauseEva);
     $("resume").addEventListener("click", () => wakeEva(""));
+    $("bgListen").addEventListener("click", toggleBgListen);
+    showBgListen();
     $("newChat").addEventListener("click", newConversation);
     $("voice").addEventListener("change", () => { stopPreview(); showVoice(true); });
     $("voicePreview").addEventListener("click", togglePreview);

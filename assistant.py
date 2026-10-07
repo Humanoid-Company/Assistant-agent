@@ -29,6 +29,7 @@ from pathlib import Path
 
 from agents.types import AgentResult
 from config import (
+    BACKGROUND_LISTENING,
     CONNECTIVITY_CHECK_INTERVAL_S,
     GOOGLE_ACCOUNT_STATE_FILE,
     GOOGLE_CALENDAR_TIMEZONE,
@@ -210,7 +211,7 @@ class Assistant(RealtimeDriverMixin, LiveDriverMixin):
     def _handle_sleeping(self) -> None:
         text, _, _ = self.stt.listen()
         rest = match_wake(text) if text else None
-        if rest is None and text and getattr(self, "_paused", False):
+        if rest is None and text and BACKGROUND_LISTENING and getattr(self, "_paused", False):
             self._background.add(text)  # the same STT that waits for «Єва, скажи» — no extra cost
         if rest is not None:
             logger.info("Wake phrase heard → AWAKE")

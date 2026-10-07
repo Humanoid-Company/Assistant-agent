@@ -100,7 +100,7 @@ app = FastAPI(title="Voice agent web backend", lifespan=_lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=FRONTEND_ORIGINS,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],  # DELETE: «Нова розмова», background listening off
     allow_headers=["*"],
 )
 
@@ -332,6 +332,16 @@ def overheard(
 ) -> dict:
     """A phrase the page's recogniser heard while Єва was paused (not addressed to her)."""
     _user(x_client_id, x_access_code).background.add(body.text[:1000])
+    return {"ok": True}
+
+
+@app.delete("/api/overheard")
+def overheard_clear(
+    x_client_id: str | None = Header(default=None),
+    x_access_code: str | None = Header(default=None),
+) -> dict:
+    """Background listening turned off on the page: forget what was heard so far."""
+    _user(x_client_id, x_access_code).background.clear()
     return {"ok": True}
 
 
