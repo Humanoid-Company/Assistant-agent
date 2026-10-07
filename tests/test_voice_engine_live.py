@@ -192,7 +192,7 @@ def test_function_result_continues_backend_exactly_once():
             arguments={},
             call_id="call-1",
             delegation_id="dlg-1",
-            response_id="resp-1",
+            key="dlg-1",
         )
 
     asyncio.run(_run())

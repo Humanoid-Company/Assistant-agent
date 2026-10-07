@@ -1,7 +1,7 @@
 """Pure helpers for nested Responses delegation events (no network/audio)."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -77,3 +77,69 @@ def extract_completed_function_call(outer_event: Any) -> CompletedFunctionCall |
 def accumulate_transcript(buffer: str, delta: str) -> str:
     """Append a transcript fragment; deltas are not complete sentences."""
     return buffer + (delta or "")
+
+
+# Nested Responses events that end a delegated response.
+RESPONSE_FINISHED_TYPES = frozenset({"response.completed", "response.incomplete", "response.failed"})
+
+
+@dataclass
+class _ResponseState:
+    calls: set[str] = field(default_factory=set)
+    outstanding: set[str] = field(default_factory=set)
+    finished: bool = False
+    continued: bool = False
+
+
+class DelegatedResponseTracker:
+    """When to send `response.create` after tool results.
+
+    A delegated response may emit several function calls (parallel_tool_calls). A fast tool can
+    finish before the model has even emitted the next call, so «every known call has a result» is
+    not enough: continue only once the response has finished AND every call it made has a result.
+    output_item.done carries no response id, so calls are grouped by the Live delegation id.
+    """
+
+    def __init__(self) -> None:
+        self._states: dict[str, _ResponseState] = {}
+
+    def response_started(self, key: str) -> None:
+        self._states[key] = _ResponseState()
+
+    def call_started(self, key: str, call_id: str) -> None:
+        state = self._states.setdefault(key, _ResponseState())
+        state.calls.add(call_id)
+        state.outstanding.add(call_id)
+
+    def response_finished(self, key: str, *, ok: bool = True) -> bool:
+        """True → continue now (results were already in)."""
+        state = self._states.get(key)
+        if state is None:
+            return False
+        if not ok:
+            state.continued = True  # a failed/cut-off response is not continued
+            return False
+        state.finished = True
+        return self._ready(state)
+
+    def call_finished(self, key: str, call_id: str) -> bool:
+        """True → continue now; False → wait for the response (or more results)."""
+        state = self._states.get(key)
+        if state is None:
+            return True  # untracked call: continue as before
+        state.outstanding.discard(call_id)
+        return self._ready(state)
+
+    def results_complete(self, key: str) -> bool:
+        """Every call seen so far has a result (fallback when the finish event never comes)."""
+        state = self._states.get(key)
+        return state is not None and not state.outstanding and not state.continued and bool(state.calls)
+
+    def mark_continued(self, key: str) -> None:
+        state = self._states.get(key)
+        if state is not None:
+            state.continued = True
+
+    @staticmethod
+    def _ready(state: _ResponseState) -> bool:
+        return state.finished and bool(state.calls) and not state.outstanding and not state.continued

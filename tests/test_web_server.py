@@ -325,7 +325,7 @@ def test_voice_change_closes_the_call_without_a_spoken_confirmation():
     user.bridges.add(bridge)
     asyncio.run(
         bridge._execute_and_continue(
-            name="change_voice", arguments={"voice": "stone"}, call_id="c1", delegation_id=None, response_id=None
+            name="change_voice", arguments={"voice": "stone"}, call_id="c1", delegation_id=None, key=""
         )
     )
     assert user.voice == "stone" and user.reconnect_pending

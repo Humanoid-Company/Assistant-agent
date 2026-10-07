@@ -36,6 +36,7 @@ from voice.options import (
     SPEED_OPTIONS,
     STYLE_OPTIONS,
     VOICE_PERSONAS,
+    VOICE_REQUEST_RE,
     _sanitize_name,
     delivery_instruction,
     voice_request_target,
@@ -84,7 +85,10 @@ class WebUser:
         voice = voice_request_target(utterance, self.voice)
         if voice is None or voice == self.voice:
             return False
-        logger.info("web.voice.by_request %s → %s", self.voice, voice)
+        # The matched words are logged so a voice switch nobody asked for can be traced.
+        match = VOICE_REQUEST_RE.search(utterance)
+        heard = utterance[match.start(): match.end() + 30] if match else ""
+        logger.info("web.voice.by_request %s → %s heard=%r", self.voice, voice, heard)
         self.voice = voice
         self.reconnect_pending = True
         self.voice_switched_at = time.time()

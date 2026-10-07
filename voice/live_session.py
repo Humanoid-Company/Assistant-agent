@@ -42,7 +42,12 @@ from tools.executor import ToolExecutionContext, ToolExecutor
 from voice.barge_in_gate import BargeInAction, BargeInGate, BargeInState
 from voice.busy_cues import BusyCueController
 from voice.conversation import ConversationLog
-from voice.delegation import extract_completed_function_call, responses_delegation
+from voice.delegation import (
+    RESPONSE_FINISHED_TYPES,
+    DelegatedResponseTracker,
+    extract_completed_function_call,
+    responses_delegation,
+)
 from voice.interrupt_intent import classify_interjection, is_backchannel_utterance
 from voice.local_vad import LocalSpeechDetector
 from voice.options import VOICE_REQUEST_RE
@@ -53,6 +58,8 @@ logger = logging.getLogger(__name__)
 
 # How much of the assistant's recent speech to compare mic transcripts against (echo check).
 _ECHO_CONTEXT_CHARS = 400
+# All results are in but the response's finish event hasn't come: continue anyway after this.
+_CONTINUE_FALLBACK_S = 2.0
 # Assistant text this far apart is a new utterance (her «угу» vs the answer that follows).
 _BURST_GAP_S = 0.8
 # Words heard with no open barge-in candidate are judged together within this window.
@@ -146,7 +153,7 @@ class LiveVoiceSession:
         self._backend_instructions = ""
         self._tasks: set[asyncio.Task] = set()
         self._tool_tasks: set[asyncio.Task] = set()
-        self._pending_tool_calls: dict[str, set[str]] = {}  # response_id -> call_ids awaiting output
+        self._responses = DelegatedResponseTracker()  # when to continue after tool results
         self._delegation_ids: dict[str, str] = {}  # response_id -> delegation_id
         self._last_barge_in_at = 0.0
         self._close_sent = False
@@ -776,12 +783,18 @@ class LiveVoiceSession:
             return
         itype = _event_attr(inner, "type")
 
+        response = _event_attr(inner, "response")
+        rid = _event_attr(response, "id") or _event_attr(inner, "response_id")
+        key = str(delegation_id or rid or "")
         if itype == "response.created":
-            response = _event_attr(inner, "response")
-            rid = _event_attr(response, "id") or _event_attr(inner, "response_id")
             if rid and delegation_id:
                 self._delegation_ids[str(rid)] = str(delegation_id)
-                self._pending_tool_calls.setdefault(str(rid), set())
+            self._responses.response_started(key)
+            return
+
+        if itype in RESPONSE_FINISHED_TYPES:
+            if self._responses.response_finished(key, ok=itype == "response.completed"):
+                await self._continue(key, reason="response_finished")
             return
 
         if itype == "response.output_item.done":
@@ -789,8 +802,7 @@ class LiveVoiceSession:
             completed = extract_completed_function_call(outer)
             if completed is None:
                 return
-            if completed.response_id:
-                self._pending_tool_calls.setdefault(completed.response_id, set()).add(completed.call_id)
+            self._responses.call_started(key, completed.call_id)
             logger.info(
                 "live.backend.function_call session_id=%s delegation_id=%s call_id=%s tool_name=%s",
                 self.session_id,
@@ -806,7 +818,7 @@ class LiveVoiceSession:
                     arguments=completed.arguments,
                     call_id=completed.call_id,
                     delegation_id=completed.delegation_id,
-                    response_id=completed.response_id,
+                    key=key,
                 )
             )
             self._tool_tasks.add(task)
@@ -834,7 +846,7 @@ class LiveVoiceSession:
         arguments: Any,
         call_id: str,
         delegation_id: str | None,
-        response_id: str | None,
+        key: str,
     ) -> None:
         if self._connection is None:
             self._busy_cues.on_tool_finished()
@@ -888,24 +900,29 @@ class LiveVoiceSession:
             if self._session_closing or self._closed.is_set():
                 return
             raise
-        if response_id and response_id in self._pending_tool_calls:
-            self._pending_tool_calls[response_id].discard(call_id)
-            # Continue only when all pending calls for this response have results.
-            if self._pending_tool_calls[response_id]:
-                return
+        if self._responses.call_finished(key, call_id):
+            await self._continue(key, reason="results_in")
+        elif self._responses.results_complete(key):
+            task = asyncio.create_task(self._continue_if_stuck(key))
+            self._tool_tasks.add(task)
+            task.add_done_callback(self._tool_tasks.discard)
+
+    async def _continue_if_stuck(self, key: str) -> None:
+        await asyncio.sleep(_CONTINUE_FALLBACK_S)
+        if self._responses.results_complete(key):
+            await self._continue(key, reason="fallback")
+
+    async def _continue(self, key: str, *, reason: str) -> None:
+        """Every call of the delegated response has its result: let the model go on."""
+        self._responses.mark_continued(key)
         if self._session_closing or self._closed.is_set() or self._connection is None:
             return
         # Cancel any lingering cue before the spoken continuation.
         self._busy_cues.on_final_response_starting()
         if self.player.playing_kind == "cue":
             self.player.interrupt()
-        await self._connection.response.create(event_id=f"continue_{call_id}")
-        logger.info(
-            "live.backend.response_continued session_id=%s delegation_id=%s call_id=%s",
-            self.session_id,
-            delegation_id,
-            call_id,
-        )
+        await self._connection.response.create(event_id=f"continue_{uuid.uuid4().hex[:8]}")
+        logger.info("live.backend.response_continued session_id=%s key=%s reason=%s", self.session_id, key, reason)
 
     async def _voice_request_after_pause(self) -> None:
         await asyncio.sleep(0.9)

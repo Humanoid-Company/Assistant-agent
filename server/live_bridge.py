@@ -18,11 +18,13 @@ from openai import AsyncOpenAI
 
 from tools.executor import ToolExecutionContext, ToolExecutor
 from voice.conversation import ConversationLog
-from voice.delegation import extract_completed_function_call
+from voice.delegation import RESPONSE_FINISHED_TYPES, DelegatedResponseTracker, extract_completed_function_call
 from voice.options import VOICE_REQUEST_RE
 
 logger = logging.getLogger(__name__)
 
+# All results are in but the response's finish event hasn't come: continue anyway after this.
+_CONTINUE_FALLBACK_S = 2.0
 # A request ends when the transcript has been quiet this long («зміни голос на …» + «чоловічий»).
 _UTTERANCE_PAUSE_S = 0.9
 
@@ -53,7 +55,7 @@ class SidebandToolBridge:
         self._connection: Any = None
         self._closed = asyncio.Event()
         self._tool_tasks: set[asyncio.Task] = set()
-        self._pending_tool_calls: dict[str, set[str]] = {}
+        self._responses = DelegatedResponseTracker()
         self._user_turns: list[str] = []
         self._input_buf = ""
         self.end_requested = False
@@ -188,19 +190,21 @@ class SidebandToolBridge:
             return
         inner = _attr(event, "event")
         itype = _attr(inner, "type")
+        response = _attr(inner, "response")
+        key = str(_attr(event, "delegation_id") or _attr(response, "id") or _attr(inner, "response_id") or "")
         if itype == "response.created":
-            response = _attr(inner, "response")
-            rid = _attr(response, "id") or _attr(inner, "response_id")
-            if rid:
-                self._pending_tool_calls.setdefault(str(rid), set())
+            self._responses.response_started(key)
+            return
+        if itype in RESPONSE_FINISHED_TYPES:
+            if self._responses.response_finished(key, ok=itype == "response.completed"):
+                await self._continue(key, reason="response_finished")
             return
         if itype != "response.output_item.done":
             return
         completed = extract_completed_function_call(event)
         if completed is None:
             return
-        if completed.response_id:
-            self._pending_tool_calls.setdefault(completed.response_id, set()).add(completed.call_id)
+        self._responses.call_started(key, completed.call_id)
         logger.info(
             "web.tool.call session_id=%s call_id=%s tool_name=%s",
             self.session_id,
@@ -214,7 +218,7 @@ class SidebandToolBridge:
                 arguments=completed.arguments,
                 call_id=completed.call_id,
                 delegation_id=completed.delegation_id,
-                response_id=completed.response_id,
+                key=key,
             )
         )
         self._tool_tasks.add(task)
@@ -227,7 +231,7 @@ class SidebandToolBridge:
         arguments: Any,
         call_id: str,
         delegation_id: str | None,
-        response_id: str | None,
+        key: str,
     ) -> None:
         ctx = ToolExecutionContext(
             session_id=self.session_id,
@@ -261,9 +265,21 @@ class SidebandToolBridge:
             event_id=f"tool_result_{call_id}",
             item={"type": "function_call_output", "call_id": call_id, "output": result.to_json()},
         )
-        if response_id and response_id in self._pending_tool_calls:
-            self._pending_tool_calls[response_id].discard(call_id)
-            if self._pending_tool_calls[response_id]:
-                return  # continue only once every call of this response has a result
+        if self._responses.call_finished(key, call_id):
+            await self._continue(key, reason="results_in")
+        elif self._responses.results_complete(key):
+            task = asyncio.create_task(self._continue_if_stuck(key))
+            self._tool_tasks.add(task)
+            task.add_done_callback(self._tool_tasks.discard)
+
+    async def _continue_if_stuck(self, key: str) -> None:
+        await asyncio.sleep(_CONTINUE_FALLBACK_S)
+        if self._responses.results_complete(key):
+            await self._continue(key, reason="fallback")
+
+    async def _continue(self, key: str, *, reason: str) -> None:
+        """Every call of the delegated response has its result: let the model go on."""
+        self._responses.mark_continued(key)
         if self.is_open:
-            await self._connection.response.create(event_id=f"continue_{call_id}")
+            logger.info("web.response.continue session_id=%s reason=%s", self.session_id, reason)
+            await self._connection.response.create(event_id=f"continue_{uuid.uuid4().hex[:8]}")

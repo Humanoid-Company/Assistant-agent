@@ -743,7 +743,12 @@
         for (let k = 0; k < result.length; k++) {
           const text = result[k].transcript;
           if (eva.mode === "active" && isStop(text)) { pauseEva(); return; }
-          if (eva.mode === "active" && result.isFinal && VOICE_REQUEST_RE.test(text)) { requestVoiceChange(text); return; }
+          // Voice change: only the recogniser's best guess (k = 0), and not while Єва is talking —
+          // this recogniser has no echo cancellation; GPT-Live's own transcript covers that case.
+          if (eva.mode === "active" && result.isFinal && k === 0 && !barge.audible && VOICE_REQUEST_RE.test(text)) {
+            requestVoiceChange(text);
+            return;
+          }
           // Wake on the final text only: it carries the whole request after «Єва, скажи».
           if (eva.mode === "waiting" && result.isFinal) {
             const rest = matchWake(text);
@@ -943,7 +948,7 @@
         voice = data.voice;
         store.set("va-voice", voice);
         showVoice();
-        addLine("system", "Голос змінено на «" + voiceLabel(voice) + "».");
+        addLine("system", "Голос змінено на «" + voiceLabel(voice) + "» (почула: «" + text.trim().slice(0, 80) + "»).");
         restartSession("switching", { switched: true });
       }
     } catch { /* offline: the server-side path may still switch */ } finally {
