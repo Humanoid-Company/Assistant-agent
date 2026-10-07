@@ -13,7 +13,7 @@ from tools.calendar_tools import CalendarToolWrappers
 from tools.executor import ToolExecutor
 from tools.task_context import TaskRevisionTracker
 from voice.barge_in_gate import BargeInState
-from voice.interrupt_intent import classify_interjection
+from voice.interrupt_intent import classify_interjection, is_backchannel_utterance
 from voice.live_session import LiveVoiceSession
 from voice.local_vad import VadTick
 
@@ -148,3 +148,58 @@ def test_idle_takeover_needs_a_recent_candidate():
     session._barge_gate._last_candidate_at = time.monotonic() - 10  # long ago
     _hear(session, "а скільки коштує квиток")
     assert session._assistant_generation == 0
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("Угу.", True),
+        ("Так-так.", True),
+        ("Ммм.", True),
+        ("Ага, ясно.", True),
+        ("Ой.", True),
+        ("Ох, нічого собі.", True),
+        ("Ой, та ну.", True),
+        ("Угу, слухаю.", True),
+        ("Ага, слухай, напруга.", False),
+        ("Угу. Завтра о десятій стендап.", False),
+        ("", False),
+    ],
+)
+def test_is_backchannel_utterance(text, expected):
+    assert is_backchannel_utterance(text) is expected
+
+
+def _says(session: LiveVoiceSession, text: str) -> None:
+    asyncio.run(session._handle_event({"type": "session.output_transcript.delta", "delta": text}))
+
+
+def test_user_talking_over_her_backchannel_does_not_interrupt():
+    session = _session()
+    steers = _steers(session)
+    _says(session, "Угу.")
+    session._barge_gate.vad.feed = lambda pcm, update_ambient=True: VadTick(  # type: ignore
+        onset=True, speaking=True, speech_frame=True, rms=3000, ambient_rms=200, frames_ms=30,
+        frame_rms_list=(3000,), frame_zcr_list=(0.1,),
+    )
+    session._maybe_local_barge_in(b"\x00\x01" * 360)
+    _hear(session, "а потім ми з Олегом сіли все переробляти")
+    assert session._assistant_generation == 0
+    assert session.player.volume == 1.0
+    assert steers == []
+
+
+def test_stop_word_still_works_during_her_backchannel():
+    session = _session()
+    _says(session, "Угу.")
+    _hear(session, "стоп")
+    assert session._assistant_generation == 1
+
+
+def test_real_answer_after_backchannel_is_interruptible_again():
+    session = _session()
+    _says(session, "Угу. ")
+    _says(session, "Завтра о десятій у тебе стендап з командою.")
+    _open_candidate(session)
+    _hear(session, "а що в мене")
+    assert session._assistant_generation == 1

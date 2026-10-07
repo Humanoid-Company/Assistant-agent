@@ -48,11 +48,13 @@ _BACKCHANNELS = frozenset(
     {
         "угу", "ага", "ага-ага", "мгм", "ммм", "мм", "м", "хм", "ну", "так", "так-так", "да", "ну да",
         "ок", "окей", "добре", "ясно", "зрозуміло", "ого", "вау", "ух", "ха", "хаха", "ахах",
-        "ага-а", "ееее", "е", "а", "о", "ой", "оу", "клас", "супер", "круто", "правда", "справді",
+        "ага-а", "ееее", "е", "а", "о", "ой", "ох", "оу", "угу-угу", "слухаю", "нічого", "собі", "та", "клас", "супер", "круто", "правда", "справді",
         "серйозно", "точно", "звісно", "yeah", "yes", "ok", "okay", "uh-huh", "mhm", "wow",
     }
 )
 _WORD_RE = re.compile(r"[\w'’ʼ-]+", re.UNICODE)
+# Єва's own listening sounds («угу», «так-так», «ммм») are at most this long.
+_MAX_BACKCHANNEL_WORDS = 3
 _TAKEOVER_MIN_WORDS = 2
 _ECHO_OVERLAP = 0.6
 
@@ -75,6 +77,13 @@ def _is_echo(words: list[str], assistant_recent: str) -> bool:
     spoken = set(_words(assistant_recent))
     overlap = sum(1 for w in content if w in spoken)
     return overlap / len(content) >= _ECHO_OVERLAP
+
+
+def is_backchannel_utterance(text: str) -> bool:
+    """What the assistant is saying is only a listener sound («Угу.», «Так-так.», «Ммм.»), said
+    while the user talks — not an answer the user would be interrupting."""
+    words = _words(text)
+    return 0 < len(words) <= _MAX_BACKCHANNEL_WORDS and all(w in _BACKCHANNELS for w in words)
 
 
 def classify_interjection(text: str, *, assistant_recent: str = "") -> InterruptIntent:

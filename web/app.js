@@ -310,12 +310,15 @@
   // Whole words only; no «секунду»/«хвилинку» — they are everyday words, not a stop request.
   const STOP_WORDS = new Set(["стоп", "зачекай", "почекай", "стривай", "досить", "stop", "wait"]);
   const splitWords = (text) => text.toLowerCase().replace(/[ʼ’`]/g, "'").split(/[^а-яіїєґa-z'-]+/i).filter(Boolean);
-  const BACKCHANNEL = new Set(["угу", "ага", "так", "ммм", "мм", "м", "ок", "окей", "добре", "ну", "ого", "ага-ага", "мгм", "ясно", "зрозуміло", "да"]);
+  const BACKCHANNEL = new Set(["угу", "ага", "так", "ммм", "мм", "м", "ок", "окей", "добре", "ну", "ого", "ага-ага", "мгм", "ясно", "зрозуміло", "да",
+    "так-так", "угу-угу", "хм", "о", "ой", "ох", "слухаю", "нічого", "собі", "та"]);
   const barge = {
     audible: false,     // assistant audio is playing right now
     speaking: false,    // user voice right now
     stage: "idle",      // idle → ducked → muted
     heard: "",          // user words since this barge-in candidate started
+    burst: "",          // what she has said since her last pause
+    burstAt: 0,
     timers: [],
     releaseTimer: null,
     speechEndedAt: 0,   // when the near voice last stopped (transcripts lag behind it)
@@ -405,7 +408,7 @@
     barge.speaking = signal.speaking;
     if (signal.speaking) {
       clearTimeout(barge.releaseTimer);
-      if (barge.stage !== "idle" || !barge.audible) return;
+      if (barge.stage !== "idle" || !barge.audible || herBackchannel()) return;
       if (Date.now() - barge.speechEndedAt > 1500) barge.heard = "";
       barge.timers.push(setTimeout(() => {
         if (barge.speaking && barge.stage === "idle") { barge.stage = "ducked"; setRemoteVolume(0.5); }
@@ -426,6 +429,7 @@
   // User transcript while the assistant talks: decide by the words, not just the sound.
   function bargeOnWords(delta) {
     if (barge.stage === "muted" || !(barge.audible || barge.stage === "ducked")) return;
+    if (herBackchannel() && !splitWords(delta).some((w) => STOP_WORDS.has(w))) return;
     // Words count only while the near voice is on (or just ended — transcripts lag); words
     // heard with no one at the mic are background talk.
     if (!barge.speaking && Date.now() - barge.speechEndedAt > 1200) return;
@@ -441,6 +445,16 @@
 
   function bargeOnAssistantText(delta) {
     barge.recentAssistant = (barge.recentAssistant + delta).slice(-300);
+    if (Date.now() - barge.burstAt > 800) barge.burst = "";
+    barge.burst += delta;
+    barge.burstAt = Date.now();
+  }
+
+  // She is only saying «угу» / «так-так» / «ммм» while the user talks (voice/interrupt_intent.py
+  // is_backchannel_utterance): that overlap is the point, not an answer to barge into.
+  function herBackchannel() {
+    const words = splitWords(barge.burst);
+    return words.length > 0 && words.length <= 3 && words.every((w) => BACKCHANNEL.has(w));
   }
 
   function onServerEvent(raw) {

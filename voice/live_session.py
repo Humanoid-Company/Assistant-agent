@@ -43,7 +43,7 @@ from voice.barge_in_gate import BargeInAction, BargeInGate, BargeInState
 from voice.busy_cues import BusyCueController
 from voice.conversation import ConversationLog
 from voice.delegation import extract_completed_function_call, responses_delegation
-from voice.interrupt_intent import classify_interjection
+from voice.interrupt_intent import classify_interjection, is_backchannel_utterance
 from voice.local_vad import LocalSpeechDetector
 from voice.options import VOICE_REQUEST_RE
 from voice.playback import PlaybackTracker
@@ -53,6 +53,8 @@ logger = logging.getLogger(__name__)
 
 # How much of the assistant's recent speech to compare mic transcripts against (echo check).
 _ECHO_CONTEXT_CHARS = 400
+# Assistant text this far apart is a new utterance (her «угу» vs the answer that follows).
+_BURST_GAP_S = 0.8
 # Words heard with no open barge-in candidate are judged together within this window.
 _IDLE_INTERJECTION_WINDOW_S = 2.0
 # After a barge-in, drop the old answer's audio at most this long (once the user is quiet).
@@ -175,6 +177,10 @@ class LiveVoiceSession:
         self._play_assistant_audio = True
         self._awaiting_output_gap = False
         self._last_output_delta_at = 0.0
+        # What she has said since her last pause: «Угу.» while the user talks is not an answer
+        # to barge into (see _speaking_backchannel).
+        self._assistant_burst = ""
+        self._assistant_burst_at = 0.0
         self._output_gap_ms = 220.0
         self._barge_in_mono = 0.0
         self._stale_dropped_chunks = 0
@@ -425,8 +431,12 @@ class LiveVoiceSession:
                     logger.warning("live.error input_audio.append: %s", type(exc).__name__)
                     await asyncio.sleep(0.05)
 
+    def _speaking_backchannel(self) -> bool:
+        return is_backchannel_utterance(self._assistant_burst)
+
     def _maybe_local_barge_in(self, chunk: bytes) -> None:
-        playing = self.player.is_playing or self._busy_cues.cue_playing
+        # Her «угу» while the user keeps talking is meant to overlap them: neither duck nor stop it.
+        playing = (self.player.is_playing or self._busy_cues.cue_playing) and not self._speaking_backchannel()
         now = time.monotonic()
         self._maybe_release_output_after_gap(now)
 
@@ -461,6 +471,8 @@ class LiveVoiceSession:
         (stop word / taking the turn), never on backchannels, room chatter or echo."""
         gate = self._barge_gate
         recent = self._recent_assistant_text
+        if self._speaking_backchannel() and classify_interjection(frag, assistant_recent=recent) != "stop":
+            return  # the user talking over her «угу» is the point of it
         if gate.state == BargeInState.POSSIBLE:
             decision = gate.note_partial_transcript(frag, assistant_recent=recent)
             if decision.action == BargeInAction.CONFIRM:
@@ -714,6 +726,11 @@ class LiveVoiceSession:
                 self._last_output_delta_at = time.monotonic()
                 return
             frag = _event_attr(event, "delta") or ""
+            now = time.monotonic()
+            if now - self._assistant_burst_at > _BURST_GAP_S:
+                self._assistant_burst = ""
+            self._assistant_burst += frag
+            self._assistant_burst_at = now
             self._output_buf += frag
             if self._conversation is not None:
                 self._conversation.add("assistant", frag)
