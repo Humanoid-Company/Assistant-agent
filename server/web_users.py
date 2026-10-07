@@ -100,6 +100,19 @@ class WebUser:
         self.voice_switched_at = time.time()
         return True
 
+    def must_keep_session(self) -> bool:
+        """A pause closes the Live session after 30 s — but not while a tool runs or Єва waits for
+        «так/ні»: a pending confirmation belongs to this session and a new one could not finish it."""
+        if any(getattr(bridge, "busy", False) for bridge in self.bridges):
+            return True
+        try:
+            sub = self.router.accounts.active_sub()
+            if not sub:
+                return False
+            return self.router.pending.has_pending(sub)
+        except Exception:
+            return False
+
     async def apply_delivery(self) -> None:
         """Push the current speed/style into the running call."""
         text = delivery_instruction(self.speed, self.style, changed=True)

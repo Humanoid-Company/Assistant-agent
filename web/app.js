@@ -508,17 +508,22 @@
   let attempt = 0;
   let dropTimer = null;
   let idleTimer = null;
-  // A forgotten open call keeps billing: after this long with nobody speaking Єва pauses…
-  const IDLE_LIMIT_MS = 5 * 60 * 1000;
+  // GPT-Live bills every second a session is open, muted or not ($0.05/min), so a forgotten call
+  // pauses after this long with nobody speaking… (config.js: IDLE_PAUSE_SECONDS)
+  const CFG = window.APP_CONFIG || {};
+  const IDLE_LIMIT_MS = (CFG.IDLE_PAUSE_SECONDS ?? 90) * 1000;
   // …and a pause this long closes the Live session; «Єва, скажи» reopens it with the history.
-  const PAUSE_CLOSE_MS = 5 * 60 * 1000;
+  // (config.js: PAUSE_CLOSE_SECONDS)
+  const PAUSE_CLOSE_MS = (CFG.PAUSE_CLOSE_SECONDS ?? 30) * 1000;
+  // A pause never keeps a call open longer than this, even while the server asks to.
+  const PAUSE_HOLD_MAX_MS = 5 * 60 * 1000;
 
   function touchActivity() {
     clearTimeout(idleTimer);
     if (!pc || eva.mode !== "active") return;
     idleTimer = setTimeout(() => {
       if (eva.mode !== "active") return;
-      addLine("system", "Тиша вже 5 хвилин — ставлю Єву на паузу, щоб не витрачати хвилини.");
+      addLine("system", "Тиша вже " + Math.round(IDLE_LIMIT_MS / 1000) + " с — ставлю Єву на паузу, щоб не витрачати хвилини. Вона все пам'ятає.");
       pauseEva();
     }, IDLE_LIMIT_MS);
   }
@@ -677,10 +682,29 @@
         : "Пауза. Натисніть «Продовжити» — Єва все пам'ятає.");
     }
     clearTimeout(eva.pauseTimer);
-    eva.pauseTimer = setTimeout(() => { if (eva.mode === "waiting" && pc) teardown(); }, PAUSE_CLOSE_MS);
+    schedulePauseClose(Date.now());
     startPhraseListener();
     showState();
     updateButtons();
+  }
+
+  // The paused call is closed after PAUSE_CLOSE_MS — unless a tool is still running or Єва waits
+  // for «так/ні» (that confirmation belongs to this session): then ask again a bit later.
+  function schedulePauseClose(pausedAt) {
+    clearTimeout(eva.pauseTimer);
+    eva.pauseTimer = setTimeout(async () => {
+      if (eva.mode !== "waiting" || !pc) return;
+      if (Date.now() - pausedAt < PAUSE_HOLD_MAX_MS) {
+        let me = null;
+        try {
+          const res = await fetch(BACKEND + "/api/me", { headers: headers() });
+          if (res.ok) me = await res.json();
+        } catch { /* offline: close as usual */ }
+        if (eva.mode !== "waiting" || !pc) return;
+        if (me && me.keep_session) { schedulePauseClose(pausedAt); return; }
+      }
+      teardown();
+    }, PAUSE_CLOSE_MS);
   }
 
   function pauseEva() {

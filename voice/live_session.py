@@ -41,7 +41,7 @@ from config import (
 from tools.executor import ToolExecutionContext, ToolExecutor
 from voice.barge_in_gate import BargeInAction, BargeInGate, BargeInState
 from voice.busy_cues import BusyCueController
-from voice.conversation import ConversationLog
+from voice.conversation import ConversationLog, remember_tool_result
 from voice.delegation import (
     RESPONSE_FINISHED_TYPES,
     DelegatedResponseTracker,
@@ -875,6 +875,7 @@ class LiveVoiceSession:
             self._sleep_requested = True
         if name == "change_voice" and result.ok:
             self.request_voice_restart()
+        remember_tool_result(self._conversation, name, result.message)
         logger.info(
             "live.backend.function_result session_id=%s delegation_id=%s call_id=%s "
             "tool_name=%s status=%s op_id=%s task_revision=%s",

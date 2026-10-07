@@ -17,7 +17,7 @@ from typing import Any
 from openai import AsyncOpenAI
 
 from tools.executor import ToolExecutionContext, ToolExecutor
-from voice.conversation import ConversationLog
+from voice.conversation import ConversationLog, remember_tool_result
 from voice.delegation import RESPONSE_FINISHED_TYPES, DelegatedResponseTracker, extract_completed_function_call
 from voice.options import VOICE_REQUEST_RE
 
@@ -96,6 +96,11 @@ class SidebandToolBridge:
             logger.info("web.sideband.closed session_id=%s", self.session_id)
             if self._on_closed:
                 self._on_closed(self)
+
+    @property
+    def busy(self) -> bool:
+        """A tool is still running for this call (the page must not close it yet)."""
+        return any(not task.done() for task in self._tool_tasks)
 
     @property
     def is_open(self) -> bool:
@@ -248,6 +253,7 @@ class SidebandToolBridge:
             return
         if name == "end_conversation" and result.ok:
             self.end_requested = True
+        remember_tool_result(self._conversation, name, result.message)
         if self.restart_for_voice:
             # Don't let this session say anything more: the next one, in the new voice, carries on.
             self.restart_for_voice = False

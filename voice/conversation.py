@@ -11,10 +11,23 @@ import threading
 from dataclasses import dataclass
 
 # GPT-Live accepts at most 128 history messages and 8,192 rendered tokens. Cyrillic text runs
-# about 3 characters per token; 15k characters leaves room for the message framing.
+# about 3 characters per token (measured 2.97): 20k characters ≈ 6.7k tokens, which leaves room for
+# the message framing. A pause now closes the session after 30 s, so this history is what a woken
+# Єва remembers — the more of it, the better.
 _LIVE_MAX_MESSAGES = 120
-_LIVE_MAX_CHARS = 15_000
+_LIVE_MAX_CHARS = 20_000
+# A tool result kept in the history (what the calendar/mail/notes/search returned).
+_TOOL_NOTE_CHARS = 400
 _KEEP_TURNS = 400
+
+
+# Tools whose results matter for later turns; session tools (voice, name, end…) carry nothing.
+REMEMBERED_TOOL_PREFIXES = ("calendar_", "gmail_", "notes_", "web_search")
+
+
+def remember_tool_result(log: ConversationLog | None, tool: str, message: str) -> None:
+    if log is not None and tool.startswith(REMEMBERED_TOOL_PREFIXES):
+        log.add_tool_note(tool, message)
 
 
 @dataclass
@@ -49,6 +62,19 @@ class ConversationLog:
             return
         with self._lock:
             self._turns.append(Turn("assistant", f"(Почула фоном під час паузи: {text})"))
+            self._turns.append(Turn("boundary", ""))
+            del self._turns[:-_KEEP_TURNS]
+
+    def add_tool_note(self, tool: str, message: str) -> None:
+        """What a tool returned, in short: a new session (after a pause or a voice change) knows only
+        the history, and «перенеси третю» needs the list she read out, not just her words."""
+        message = " ".join((message or "").split())
+        if not message:
+            return
+        if len(message) > _TOOL_NOTE_CHARS:
+            message = message[: _TOOL_NOTE_CHARS - 1] + "…"
+        with self._lock:
+            self._turns.append(Turn("assistant", f"(Результат {tool}: {message})"))
             self._turns.append(Turn("boundary", ""))
             del self._turns[:-_KEEP_TURNS]
 

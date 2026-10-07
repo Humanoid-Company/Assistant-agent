@@ -257,6 +257,7 @@ def me(
         "style": user.style,
         "reconnect": user.reconnect_pending,  # voice changed by voice command: page reconnects
         "voice_note": user.voice_switch_note,  # why it changed (diagnostics on the page)
+        "keep_session": user.must_keep_session(),  # paused: don't close the call yet
         "history_turns": len(user.conversation),
     }
 
