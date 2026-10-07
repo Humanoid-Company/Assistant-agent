@@ -31,6 +31,15 @@ from voice.options import (
 logger = logging.getLogger(__name__)
 
 
+# Said right after a wake phrase so the user hears Єва is on (same wording in web/app.js).
+WAKE_GREETING = (
+    "The user just called you: «{phrase}». You are back and listening — let them hear it. "
+    "Reply right away in two to four words that match it: to «привіт», «вітаю», «гей» greet back "
+    "warmly («Привіт! Що робимо?», «О, привіт! Слухаю»), otherwise a short «Так, слухаю» or "
+    "«Слухаю тебе». Vary it, then wait."
+)
+
+
 class LiveDriverMixin:
     # Set up by Assistant.__init__ / the awake-session loop.
     _live: LiveVoiceSession | None
@@ -85,10 +94,7 @@ class LiveDriverMixin:
             elif wake_request:
                 live.speak_context(f"The user just said to you: «{wake_request}». Answer it.")
             elif self._wake_phrase:
-                live.speak_context(
-                    f"The user called you: «{self._wake_phrase}». Answer in two or three words, matching it "
-                    "(a greeting back to «привіт», otherwise «Слухаю»), and wait."
-                )
+                live.speak_context(WAKE_GREETING.format(phrase=self._wake_phrase))
             else:
                 live.speak_context("Слухаю!")
             if alert := self._connectivity_watcher.pop_alert():

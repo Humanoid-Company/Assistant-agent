@@ -688,14 +688,25 @@
     }
   }
 
+  // Same wording as WAKE_GREETING in voice/live_driver.py.
+  const wakeGreeting = (phrase) =>
+    "The user just called you: «" + phrase + "». You are back and listening — let them hear it. " +
+    "Reply right away in two to four words that match it: to «привіт», «вітаю», «гей» greet back " +
+    "warmly («Привіт! Що робимо?», «О, привіт! Слухаю»), otherwise a short «Так, слухаю» or " +
+    "«Слухаю тебе». Vary it, then wait.";
+
+  // A greeting tells the user Єва is on. Skipped only when they already went on talking (the model
+  // answers that) or she is already speaking; a noise at the wrong moment just delays it a little.
   function greetIfQuiet(heard = "") {
     const wokeAt = Date.now();
     const phrase = heard || "Єва, скажи";
-    setTimeout(() => {
-      if (eva.mode === "active" && !barge.speaking && !barge.audible && eva.lastUserAt < wokeAt) {
-        commentary("The user called you: «" + phrase + "». Answer in two or three words, matching it (a greeting back to «привіт», otherwise «Слухаю» / «Так?»), and wait.");
-      }
-    }, 1200);
+    const giveUpAt = wokeAt + 4000;
+    const tryGreet = () => {
+      if (eva.mode !== "active" || eva.lastUserAt > wokeAt || barge.audible) return;
+      if (barge.speaking && Date.now() < giveUpAt) { setTimeout(tryGreet, 300); return; }
+      commentary(wakeGreeting(phrase));
+    };
+    setTimeout(tryGreet, 700);
   }
 
   // The browser's own recogniser (free; Chrome, Edge, Safari) runs the whole time Єва is on: it
