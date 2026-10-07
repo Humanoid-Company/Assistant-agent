@@ -1,0 +1,7 @@
+# Keep LF in the repo and working tree on every OS (Windows checkouts turned every file "modified").
+* text=auto eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.m4a binary
+*.wav binary
+*.png binary

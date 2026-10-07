@@ -1,9 +1,9 @@
 """
 Text-to-speech for the single startup line, before the wake phrase is heard.
 
-The live conversation is voiced entirely by the Realtime API session in
-`realtime_client.py` (RealtimePlayer) — this module only covers the moment
-before that session exists.
+The conversation itself is voiced by the voice-engine session — GPT-Live
+(`voice/live_session.py`, default) or legacy Realtime (`realtime_client.py`) —
+this module only covers the moment before that session exists.
 """
 import io
 import logging

@@ -1,7 +1,8 @@
 """
 Speech-to-text via Google STT — used only while SLEEPING (wake-phrase
-detection). The live conversation after wake-up goes through the persistent
-Realtime API session in `realtime_client.py`, which does its own transcription.
+detection). The conversation after wake-up goes through the voice-engine
+session (GPT-Live by default, legacy Realtime as fallback), which does its own
+transcription.
 
 Recording via sounddevice persistent stream (opened once per session).
 Transcription via Google Speech Recognition — fast, ~0.3–0.8 s.

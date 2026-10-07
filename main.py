@@ -10,7 +10,7 @@ Prerequisites
   1. uv sync
   2. Create a .env file:
         OPENAI_API_KEY=sk-...
-  3. Run; say "привіт" to wake the assistant.
+  3. Run; say «Єва, скажи» to wake the assistant, «Дякую, Єва» to pause.
 """
 import logging
 import sys

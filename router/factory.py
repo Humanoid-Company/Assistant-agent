@@ -13,6 +13,7 @@ from agents.pending_store import PendingStore
 from auth.account_manager import AccountManager
 from auth.google_oauth import GoogleOAuthClient
 from auth.token_store import InMemoryTokenStore, KeyringTokenStore, TokenStore
+from config import SESSION_IDLE_TIMEOUT_S, SHARED_DEVICE_MODE
 from router.agent_router import AgentRouter
 
 logger = logging.getLogger(__name__)
@@ -41,12 +42,10 @@ def build_agent_router(
     shared_device: bool | None = None,
     session_idle_timeout_s: float | None = None,
 ) -> AgentRouter:
-    import os
-
     if shared_device is None:
-        shared_device = os.getenv("SHARED_DEVICE_MODE", "false").lower() in ("1", "true", "yes")
+        shared_device = SHARED_DEVICE_MODE
     if session_idle_timeout_s is None:
-        session_idle_timeout_s = float(os.getenv("SESSION_IDLE_TIMEOUT_S", "300"))
+        session_idle_timeout_s = SESSION_IDLE_TIMEOUT_S
 
     store = token_store or _make_token_store(use_keyring)
     oauth = GoogleOAuthClient(client_secrets_file, store)
