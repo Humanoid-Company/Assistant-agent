@@ -15,8 +15,10 @@ from openai import AsyncOpenAI, OpenAI
 from config import (
     OPENAI_API_KEY,
     OPENAI_LIVE_AUDIO_RATE,
+    OPENAI_LIVE_BACKEND_EFFORT,
     OPENAI_LIVE_BACKEND_MODEL,
     OPENAI_LIVE_MODEL,
+    OPENAI_LIVE_PARALLEL_TOOLS,
     OPENAI_LIVE_VOICE,
     TTS_MODEL,
     TTS_VOICE,
@@ -40,7 +42,7 @@ from tools.executor import ToolExecutionContext, ToolExecutor
 from voice.barge_in_gate import BargeInAction, BargeInGate, BargeInState
 from voice.busy_cues import BusyCueController
 from voice.conversation import ConversationLog
-from voice.delegation import extract_completed_function_call
+from voice.delegation import extract_completed_function_call, responses_delegation
 from voice.interrupt_intent import classify_interjection
 from voice.local_vad import LocalSpeechDetector
 from voice.options import VOICE_REQUEST_RE
@@ -67,13 +69,18 @@ def _event_attr(obj: Any, name: str, default: Any = None) -> Any:
     return getattr(obj, name, default)
 
 
+_cue_client: OpenAI | None = None
+
+
 def _synthesize_cue_pcm(text: str) -> bytes | None:
     """Local OpenAI TTS → raw PCM16 @ 24 kHz (no Live reasoning cycle)."""
+    global _cue_client
     if not text.strip():
         return None
     try:
-        client = OpenAI(api_key=OPENAI_API_KEY)
-        response = client.audio.speech.create(
+        if _cue_client is None:
+            _cue_client = OpenAI(api_key=OPENAI_API_KEY)  # one client: reuses its HTTPS connection
+        response = _cue_client.audio.speech.create(
             model=TTS_MODEL,
             voice=TTS_VOICE,
             input=text,
@@ -369,16 +376,13 @@ class LiveVoiceSession:
                 "format": {"type": "audio/pcm", "rate": self._audio_rate},
                 "output": {"voice": self._voice},
             },
-            "delegation": {
-                "type": "responses",
-                "responses": {
-                    "model": self._backend_model,
-                    "instructions": self._backend_instructions,
-                    "tools": self._backend_tools(),
-                    "tool_choice": "auto",
-                    "parallel_tool_calls": False,
-                },
-            },
+            "delegation": responses_delegation(
+                model=self._backend_model,
+                instructions=self._backend_instructions,
+                tools=self._backend_tools(),
+                parallel_tools=OPENAI_LIVE_PARALLEL_TOOLS,
+                effort=OPENAI_LIVE_BACKEND_EFFORT,
+            ),
         }
         if self._conversation is not None and (history := self._conversation.live_input()):
             config["input"] = history

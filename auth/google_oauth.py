@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -68,6 +69,11 @@ class GoogleOAuthClient:
         self._store = token_store
         self._flow_factory = flow_factory or _default_flow_factory
         self._open_browser = open_browser
+        # One live Credentials object per account while its stored record is unchanged: the
+        # pooled Google connections hold it and refresh it in place, so a new copy per tool
+        # call would refresh the same expired token a second time.
+        self._live: dict[str, tuple[tuple[str, tuple[str, ...]], Credentials]] = {}
+        self._live_lock = threading.Lock()
 
     def ensure_client_secrets(self) -> None:
         if not self._client_secrets.exists():
@@ -175,8 +181,31 @@ class GoogleOAuthClient:
         """Restore credentials using persisted granted_scopes (never ALL_KNOWN)."""
         record = self._store.load_record(google_sub)
         if not record:
+            with self._live_lock:
+                self._live.pop(google_sub, None)
             return None
         creds_json, stored_scopes = record
+        key = (creds_json, tuple(stored_scopes))
+        with self._live_lock:
+            cached = self._live.get(google_sub)
+        if cached is not None and cached[0] == key:
+            credentials = cached[1]
+        else:
+            credentials = self._credentials_from_record(creds_json, stored_scopes)
+        credentials = self.refresh_if_needed(
+            credentials,
+            google_sub,
+            stored_scopes=stored_scopes or list(credentials.scopes or []),
+        )
+        # A refresh re-saves the record: key the cache by what is stored now.
+        current = self._store.load_record(google_sub)
+        if current:
+            with self._live_lock:
+                self._live[google_sub] = ((current[0], tuple(current[1])), credentials)
+        return credentials
+
+    @staticmethod
+    def _credentials_from_record(creds_json: str, stored_scopes: list[str]) -> Credentials:
         info = json.loads(creds_json)
         # Pass only the verified granted list — empty means trust whatever is in the JSON.
         if stored_scopes:
@@ -187,11 +216,7 @@ class GoogleOAuthClient:
             object.__setattr__(credentials, "granted_scopes", stored_scopes or list(credentials.scopes or []))
         except Exception:
             pass
-        return self.refresh_if_needed(
-            credentials,
-            google_sub,
-            stored_scopes=stored_scopes or list(credentials.scopes or []),
-        )
+        return credentials
 
     def refresh_if_needed(
         self,

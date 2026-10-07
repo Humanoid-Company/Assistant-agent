@@ -5,6 +5,27 @@ from dataclasses import dataclass
 from typing import Any
 
 
+def responses_delegation(
+    *,
+    model: str,
+    instructions: str,
+    tools: list[dict],
+    parallel_tools: bool,
+    effort: str = "",
+) -> dict[str, Any]:
+    """Live session `delegation` block — shared by the desktop session and the web backend."""
+    responses: dict[str, Any] = {
+        "model": model,
+        "instructions": instructions,
+        "tools": tools,
+        "tool_choice": "auto",
+        "parallel_tool_calls": parallel_tools,
+    }
+    if effort:
+        responses["reasoning"] = {"effort": effort}
+    return {"type": "responses", "responses": responses}
+
+
 def event_attr(obj: Any, name: str, default: Any = None) -> Any:
     if obj is None:
         return default

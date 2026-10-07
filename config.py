@@ -45,6 +45,12 @@ STT_REALTIME_LANGUAGE: str = "uk"
 OPENAI_LIVE_MODEL: str = os.getenv("OPENAI_LIVE_MODEL", "gpt-live-1")
 # Responses delegation backend — configurable; default from current OpenAI Live docs.
 OPENAI_LIVE_BACKEND_MODEL: str = os.getenv("OPENAI_LIVE_BACKEND_MODEL", "gpt-6-luna")
+# Backend may call several tools at once («що завтра і чи є нові листи»). Only read-only
+# tools actually run side by side — the executor serializes the rest.
+OPENAI_LIVE_PARALLEL_TOOLS: bool = os.getenv("OPENAI_LIVE_PARALLEL_TOOLS", "true").lower() in ("1", "true", "yes")
+# Reasoning effort of the backend model (minimal|low|medium|high). Empty = model default.
+# Lower = shorter pause before tool calls; check quality on real requests before keeping it.
+OPENAI_LIVE_BACKEND_EFFORT: str = os.getenv("OPENAI_LIVE_BACKEND_EFFORT", "").strip().lower()
 # Gleam: the team's pick by ear on Ukrainian samples (marin stays the Realtime default).
 OPENAI_LIVE_VOICE: str = os.getenv("OPENAI_LIVE_VOICE", "gleam")
 OPENAI_LIVE_AUDIO_RATE: int = int(os.getenv("OPENAI_LIVE_AUDIO_RATE", "24000"))

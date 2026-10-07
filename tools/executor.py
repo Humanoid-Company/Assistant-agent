@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -35,6 +36,20 @@ _CONFIRM_TOOLS = frozenset(
         "calendar_reject_operation",
         "gmail_confirm_send",
         "gmail_reject_send",
+    }
+)
+
+# Safe to run side by side when the backend issues parallel tool calls; every other
+# calendar/gmail/notes tool (prepare/confirm/reject, notes writes) runs one at a time.
+_READ_ONLY_TOOLS = frozenset(
+    {
+        "calendar_list_events",
+        "calendar_search_events",
+        "gmail_search_messages",
+        "gmail_read_message",
+        "notes_read",
+        "notes_search",
+        "notes_count",
     }
 )
 
@@ -73,6 +88,8 @@ class ToolExecutor:
         self._gmail = gmail
         self._notes = notes
         self._revisions = revisions or TaskRevisionTracker()
+        # Held in the worker thread by every non-read-only Google tool (see _READ_ONLY_TOOLS).
+        self._mutation_lock = threading.Lock()
         self._handlers: dict[str, _HandlerSpec] = {}
         for name, handler in (handlers or {}).items():
             if isinstance(handler, _HandlerSpec):
@@ -230,7 +247,7 @@ class ToolExecutor:
 
         if name.startswith("calendar_"):
             logger.info("live.tool.offloaded_to_thread tool_name=%s", name)
-            return await asyncio.to_thread(_calendar_call)
+            return await asyncio.to_thread(self._serialized(name, _calendar_call))
 
         if name.startswith("gmail_"):
             if self._gmail is None:
@@ -256,7 +273,7 @@ class ToolExecutor:
 
             logger.info("live.tool.offloaded_to_thread tool_name=%s", name)
             try:
-                return await asyncio.to_thread(_gmail_call)
+                return await asyncio.to_thread(self._serialized(name, _gmail_call))
             except KeyError:
                 return ToolResult(ok=False, status="error", message=f"Невідома команда: {name}")
 
@@ -284,11 +301,21 @@ class ToolExecutor:
 
             logger.info("live.tool.offloaded_to_thread tool_name=%s", name)
             try:
-                return await asyncio.to_thread(_notes_call)
+                return await asyncio.to_thread(self._serialized(name, _notes_call))
             except KeyError:
                 return ToolResult(ok=False, status="error", message=f"Невідома команда: {name}")
 
         return ToolResult(ok=False, status="error", message=f"Невідома команда: {name}")
+
+    def _serialized(self, name: str, call: Callable[[], AgentResult]) -> Callable[[], AgentResult]:
+        if name in _READ_ONLY_TOOLS:
+            return call
+
+        def locked() -> AgentResult:
+            with self._mutation_lock:
+                return call()
+
+        return locked
 
     async def _call_handler(
         self,

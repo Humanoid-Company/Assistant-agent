@@ -35,8 +35,10 @@ from config import (
     GOOGLE_CALENDAR_TIMEZONE,
     GOOGLE_OAUTH_CLIENT_SECRETS_FILE,
     OPENAI_API_KEY,
+    OPENAI_LIVE_BACKEND_EFFORT,
     OPENAI_LIVE_BACKEND_MODEL,
     OPENAI_LIVE_MODEL,
+    OPENAI_LIVE_PARALLEL_TOOLS,
     OPENAI_LIVE_VOICE,
 )
 from prompts.backend_prompt import build_backend_prompt
@@ -44,6 +46,7 @@ from prompts.live_prompt import build_live_prompt
 from server.live_bridge import SidebandToolBridge
 from server.web_users import WebUser, WebUserRegistry
 from tools.live_schemas import LIVE_BACKEND_TOOLS
+from voice.delegation import responses_delegation
 from voice.options import LANGUAGE_OPTIONS, SPEED_OPTIONS, STYLE_OPTIONS, VOICE_PERSONAS, delivery_instruction
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)-8s] %(name)s: %(message)s")
@@ -140,16 +143,13 @@ def _session_config(user: WebUser) -> dict:
         )
         + _WEB_NOTE,
         "audio": {"output": {"voice": voice}},
-        "delegation": {
-            "type": "responses",
-            "responses": {
-                "model": OPENAI_LIVE_BACKEND_MODEL,
-                "instructions": build_backend_prompt(today=today, language_name=language),
-                "tools": LIVE_BACKEND_TOOLS,
-                "tool_choice": "auto",
-                "parallel_tool_calls": False,
-            },
-        },
+        "delegation": responses_delegation(
+            model=OPENAI_LIVE_BACKEND_MODEL,
+            instructions=build_backend_prompt(today=today, language_name=language),
+            tools=LIVE_BACKEND_TOOLS,
+            parallel_tools=OPENAI_LIVE_PARALLEL_TOOLS,
+            effort=OPENAI_LIVE_BACKEND_EFFORT,
+        ),
     }
     # A new voice or a wake after a long pause is a new Live session: it starts from the
     # conversation so far, so nothing said before is forgotten.

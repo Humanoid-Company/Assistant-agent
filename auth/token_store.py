@@ -122,6 +122,15 @@ class KeyringTokenStore(TokenStore):
         self._service = service_name
         self._index_user = "__index__"
         self._chunk_max_bytes = chunk_max_bytes
+        # Every tool call reads the active token; a keyring read is a (multi-chunk) OS call.
+        # Only this process writes these entries (single-instance lock), so cache reads and
+        # drop the cache on every save/delete.
+        self._loaded: dict[str, str | None] = {}
+        self._subs: list[str] | None = None
+
+    def _forget(self, google_sub: str) -> None:
+        self._loaded.pop(google_sub, None)
+        self._subs = None
 
     def _chunk_key(self, google_sub: str, index: int) -> str:
         return _CHUNK_KEY_FMT.format(sub=google_sub, index=index)
@@ -148,6 +157,7 @@ class KeyringTokenStore(TokenStore):
         try:
             self._save_chunked(google_sub, credentials_json)
         except TokenStoreError:
+            self._forget(google_sub)
             logger.error(
                 "google.token_store.save_failed sub=%s payload_bytes=%s",
                 google_sub[:8],
@@ -155,6 +165,7 @@ class KeyringTokenStore(TokenStore):
             )
             raise
         except Exception as exc:
+            self._forget(google_sub)
             logger.error(
                 "google.token_store.save_failed sub=%s payload_bytes=%s error=%s",
                 google_sub[:8],
@@ -164,6 +175,7 @@ class KeyringTokenStore(TokenStore):
             raise TokenStoreError(
                 f"Failed to persist Google credentials ({type(exc).__name__})."
             ) from exc
+        self._forget(google_sub)
         logger.info(
             "google.token_store.saved sub=%s payload_bytes=%s",
             google_sub[:8],
@@ -218,6 +230,11 @@ class KeyringTokenStore(TokenStore):
         return "".join(parts)
 
     def load(self, google_sub: str) -> str | None:
+        if google_sub not in self._loaded:
+            self._loaded[google_sub] = self._load_uncached(google_sub)
+        return self._loaded[google_sub]
+
+    def _load_uncached(self, google_sub: str) -> str | None:
         raw = self._keyring.get_password(self._service, google_sub)
         if not raw:
             return None
@@ -257,6 +274,7 @@ class KeyringTokenStore(TokenStore):
             self._keyring.set_password(self._service, self._index_user, json.dumps(remaining))
         except Exception:
             pass
+        self._forget(google_sub)
         logger.info("Deleted Google credentials for sub=%s…", google_sub[:8])
 
     def _delete_password(self, username: str) -> None:
@@ -266,6 +284,11 @@ class KeyringTokenStore(TokenStore):
             pass
 
     def list_subs(self) -> list[str]:
+        if self._subs is None:
+            self._subs = self._list_subs_uncached()
+        return list(self._subs)
+
+    def _list_subs_uncached(self) -> list[str]:
         raw = self._keyring.get_password(self._service, self._index_user)
         if not raw:
             return []
