@@ -628,10 +628,13 @@
         commentary("Your voice was just changed while you were saying: «" + opts.interrupted.slice(-500) +
           "». Continue exactly that answer in the new voice from where it stopped (its last few words may not have been heard) — do not start it over, do not mention the voice change.");
       }
+    } else if (opts.request) {
+      Promise.resolve(opts.note).then((n) => commentary(withNote(n, opts.request)));
     } else if (opts.say) {
       commentary(opts.say);
     } else if (opts.greet) {
-      greetIfQuiet(opts.heard, opts.note);
+      // A fresh call after a wake: the user finished the phrase seconds ago — greet at once.
+      greetIfQuiet(opts.heard, opts.note, opts.fresh ? 0 : 700);
     }
     showState();
     updateButtons();
@@ -703,7 +706,7 @@
         if (eva.mode !== "waiting" || !pc) return;
         if (me && me.keep_session) { schedulePauseClose(pausedAt); return; }
       }
-      teardown();
+      teardown({ keepMic: true }); // the wake phrase listener needs it anyway; the next wake skips getUserMedia
     }, PAUSE_CLOSE_MS);
   }
 
@@ -749,27 +752,28 @@
       : "Фонове слухання вимкнено: на паузі Єва нічого не запам'ятовує.");
   }
 
-  async function wakeEva(rest, heard = "") {
-    if (eva.mode !== "waiting" || eva.waking) return;
-    eva.waking = true;
-    clearTimeout(eva.pauseTimer);
-    const note = await overheardNote();
-    eva.waking = false;
+  // The model was muted and never heard the phrase: hand it what followed «Єва, скажи», together
+  // with what she overheard during the pause (fetched while the call connects, not before it).
+  const withNote = (note, text) => (note ? note + "\n\n" + text : text);
+
+  function wakeEva(rest, heard = "") {
     if (eva.mode !== "waiting") return;
-    // The model was muted and never heard the phrase: hand it what followed «Єва, скажи».
+    clearTimeout(eva.pauseTimer);
+    const note = overheardNote(); // a promise: never delays the wake
     const request = rest ? "The user just said to you: «" + rest + "». Answer it." : "";
-    const say = request && note ? note + "\n\n" + request : request;
     if (rest) addLine("user", "Єва, скажи, " + rest);
     if (pc && channel && channel.readyState === "open") {
       eva.mode = "active";
       sendEvent({ type: "session.input_audio.unmute", event_id: eventId("unmute") });
       setRemoteVolume(1);
-      if (say) commentary(say); else greetIfQuiet(heard, note);
+      if (request) note.then((n) => commentary(withNote(n, request)));
+      else greetIfQuiet(heard, note);
       showState();
       updateButtons();
       touchActivity();
     } else {
-      start({ say, greet: !say, heard, note }); // the pause closed the call: reopen it with the history
+      // The pause closed the call: reopen it right away with the history.
+      start({ request, greet: !request, heard, note, fresh: true });
     }
   }
 
@@ -783,17 +787,20 @@
   // A greeting tells the user Єва is on. Skipped only when they already went on talking (the model
   // answers that) or she is already speaking; a noise at the wrong moment just delays it a little.
   // note: what she overheard during the pause — delivered with the greeting, or alone if skipped.
-  function greetIfQuiet(heard = "", note = "") {
+  // note: a string or a promise of one (overheardNote) — never waited for before the greeting.
+  function greetIfQuiet(heard = "", note = "", delayMs = 700) {
     const wokeAt = Date.now();
     const phrase = heard || "Єва, скажи";
     const giveUpAt = wokeAt + 4000;
-    const tryGreet = () => {
+    const tryGreet = async () => {
       if (eva.mode !== "active") return;
-      if (eva.lastUserAt > wokeAt || barge.audible) { if (note) commentary(note); return; }
+      const n = await Promise.resolve(note);
+      if (eva.mode !== "active") return;
+      if (eva.lastUserAt > wokeAt || barge.audible) { if (n) commentary(n); return; }
       if (barge.speaking && Date.now() < giveUpAt) { setTimeout(tryGreet, 300); return; }
-      commentary(note ? note + "\n\n" + wakeGreeting(phrase) : wakeGreeting(phrase));
+      commentary(withNote(n, wakeGreeting(phrase)));
     };
-    setTimeout(tryGreet, 700);
+    setTimeout(tryGreet, delayMs);
   }
 
   // The browser's own recogniser (free; Chrome, Edge, Safari) runs the whole time Єва is on: it
