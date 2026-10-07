@@ -35,20 +35,25 @@
         <button id="pause" class="btn ghost" hidden>Пауза</button>
       </div>
       <p id="wakeHint" class="hint">Покличте Єву — «Єва, скажи», «Привіт, Єва», «Гей, Єва». «Дякую, Єва» — пауза.</p>
-      <button id="bgListen" class="btn ghost small-btn" aria-pressed="true">Слухати фоном на паузі: увімк.</button>
+      <label class="setting" for="bgListen">
+        <span class="setting-text">
+          <span class="setting-title">Слухати фоном на паузі</span>
+          <span id="bgListenInfo" class="hint">Єва запам'ятовує, про що говорять поруч, і може нагадати.</span>
+        </span>
+        <input id="bgListen" type="checkbox" class="switch" role="switch" checked>
+      </label>
     </section>
 
     <section class="card">
-      <h2>Голос Єви</h2>
-      <label for="voice">Голос</label>
-      <select id="voice" disabled>
-        <option>Завантаження…</option>
-      </select>
-      <p id="voiceInfo" class="hint"></p>
-      <div class="row">
+      <h2><label for="voice">Голос Єви</label></h2>
+      <div class="row voice-pick">
+        <select id="voice" disabled>
+          <option>Завантаження…</option>
+        </select>
         <button id="voicePreview" class="btn" disabled>▶ Прослухати</button>
-        <button id="voiceApply" class="btn primary" hidden>Застосувати</button>
       </div>
+      <p id="voiceInfo" class="hint"></p>
+      <button id="voiceApply" class="btn primary wide" hidden>Застосувати</button>
       <div class="settings">
         <div>
           <label for="speed">Темп</label>
@@ -67,7 +72,10 @@
           </select>
         </div>
       </div>
-      <label for="volume">Гучність <span id="volumeValue" class="muted"></span></label>
+      <div class="label-row">
+        <label for="volume">Гучність</label>
+        <span id="volumeValue" class="muted small"></span>
+      </div>
       <input id="volume" type="range" min="0" max="100" step="5">
       <p class="hint">Темп, манера й гучність діють одразу, навіть посеред розмови. Новий голос — після
         «Застосувати»: Єва продовжить ним з усією пам'яттю. Тембру й точної швидкості GPT-Live не має,

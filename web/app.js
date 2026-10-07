@@ -707,13 +707,14 @@
   }
 
   function showBgListen() {
-    const b = $("bgListen");
-    b.setAttribute("aria-pressed", String(bgListen));
-    b.textContent = "Слухати фоном на паузі: " + (bgListen ? "увімк." : "вимк.");
+    $("bgListen").checked = bgListen;
+    $("bgListenInfo").textContent = bgListen
+      ? "Увімкнено: Єва запам'ятовує, про що говорять поруч, і може нагадати."
+      : "Вимкнено: на паузі Єва нічого не запам'ятовує.";
   }
 
   function toggleBgListen() {
-    bgListen = !bgListen;
+    bgListen = $("bgListen").checked;
     store.set("va-bg-listen", bgListen ? "1" : "0");
     showBgListen();
     showState();
@@ -1089,7 +1090,7 @@
     $("talk").addEventListener("click", () => (eva.mode === "off" ? start(defaultStart()) : stop()));
     $("pause").addEventListener("click", pauseEva);
     $("resume").addEventListener("click", () => wakeEva(""));
-    $("bgListen").addEventListener("click", toggleBgListen);
+    $("bgListen").addEventListener("change", toggleBgListen);
     showBgListen();
     $("newChat").addEventListener("click", newConversation);
     $("voice").addEventListener("change", () => { stopPreview(); showVoice(true); });
