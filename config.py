@@ -91,7 +91,9 @@ VOICE_BARGE_IN_ENERGY_MARGIN_PLAYING: float = float(
     os.getenv("VOICE_BARGE_IN_ENERGY_MARGIN_PLAYING", "3.0")
 )
 
-VOICE_BUSY_CUES_ENABLED: bool = os.getenv("VOICE_BUSY_CUES_ENABLED", "true").lower() in (
+# Off by default: the cue is synthesized by a separate TTS voice (TTS_VOICE), so «Угу» came out
+# in a different voice than Єва's. GPT-Live now says the short acknowledgement itself.
+VOICE_BUSY_CUES_ENABLED: bool = os.getenv("VOICE_BUSY_CUES_ENABLED", "false").lower() in (
     "1",
     "true",
     "yes",

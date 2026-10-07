@@ -62,9 +62,7 @@ MAX_SESSION_S = float(os.getenv("MAX_SESSION_MINUTES", "30")) * 60
 
 _WEB_NOTE = (
     "\nWeb demo: you run in a browser tab for the team to try. To connect Google the person "
-    "presses the «Підключити Google» button on the page; you will be told when the login finishes. "
-    "There are no local busy cues here: before a task that takes a moment (calendar, mail, notes, "
-    "web search) say a very short acknowledgement first — «Так», «Зараз гляну», «Секунду» — vary it."
+    "presses the «Підключити Google» button on the page; you will be told when the login finishes."
 )
 _CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9-]{16,64}$")
 _background_tasks: set[asyncio.Task] = set()
