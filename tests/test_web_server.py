@@ -367,6 +367,7 @@ def test_bridge_switches_voice_from_the_transcript(monkeypatch):
     from server.live_bridge import SidebandToolBridge
 
     monkeypatch.setattr(bridge_mod, "_UTTERANCE_PAUSE_S", 0.01)
+    monkeypatch.setattr(bridge_mod, "_PAGE_FIRST_S", 0)
     user = web.users.get("gina-browser-0123456789a")
     user.voice = "gleam"
     closed = []

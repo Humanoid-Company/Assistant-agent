@@ -27,6 +27,9 @@ logger = logging.getLogger(__name__)
 _CONTINUE_FALLBACK_S = 2.0
 # A request ends when the transcript has been quiet this long («зміни голос на …» + «чоловічий»).
 _UTTERANCE_PAUSE_S = 0.9
+# The page acts on the same request first (/api/voice-request) and swaps calls without a gap; this
+# path only catches what it missed (an old cached page), so it waits that much longer.
+_PAGE_FIRST_S = 1.5
 
 
 def _attr(obj: Any, name: str) -> Any:
@@ -139,7 +142,7 @@ class SidebandToolBridge:
         )
 
     async def _voice_request_after_pause(self, utterance: str) -> None:
-        await asyncio.sleep(_UTTERANCE_PAUSE_S)
+        await asyncio.sleep(_UTTERANCE_PAUSE_S + _PAGE_FIRST_S)
         self._voice_check = None
         if not self.is_open or self._on_voice_request is None:
             return

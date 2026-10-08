@@ -289,6 +289,9 @@
     thinkTimer: null,
     pauseTimer: null,
     recognizer: null,
+    voiceRequestBusy: false,
+    inputBuf: "",       // the Live transcript of the user's current turn, for «зміни голос …»
+    voiceCheckTimer: null,
     wakeSupported: Boolean(window.SpeechRecognition || window.webkitSpeechRecognition) && params.get("wake") !== "off",
   };
 
@@ -487,6 +490,7 @@
         appendTranscript("user", event.delta);
         eva.lastUserAt = Date.now();
         eva.recentUser = (eva.recentUser + event.delta).slice(-80);
+        checkVoiceRequest(event.delta);
         // «Дякую, Єва» — also while she is talking: cut her off and pause.
         if (isStop(eva.recentUser)) { pauseEva(); break; }
         eva.thinking = true;
@@ -500,6 +504,7 @@
         if (eva.mode === "waiting") break; // whatever she says to «Дякую, Єва» is not played
         appendTranscript("assistant", event.delta);
         bargeOnAssistantText(event.delta);
+        eva.inputBuf = ""; // she answers: the user's turn is over
         eva.thinking = false;
         touchActivity();
         break;
@@ -637,6 +642,9 @@
     ch.onclose = () => { if (pc === peer && eva.mode !== "connecting" && eva.mode !== "switching") onSessionClosed(); };
   }
 
+  const continueInNewVoice = (said) => "Your voice was just changed while you were saying: «" + said.slice(-500) +
+    "». Continue exactly that answer in the new voice from where it stopped (its last few words may not have been heard) — do not start it over, do not mention the voice change.";
+
   // session.started: the call is up — pause, or talk.
   function applyStart() {
     const opts = eva.pending || {};
@@ -648,10 +656,7 @@
     if (opts.switched) {
       // A new voice is a new session: carry on as if nothing happened — no «тепер я іншим голосом».
       // Asked by voice: nothing to say — she just listens on in the new voice.
-      if (opts.interrupted) {
-        commentary("Your voice was just changed while you were saying: «" + opts.interrupted.slice(-500) +
-          "». Continue exactly that answer in the new voice from where it stopped (its last few words may not have been heard) — do not start it over, do not mention the voice change.");
-      }
+      if (opts.interrupted) commentary(continueInNewVoice(opts.interrupted));
     } else if (opts.userText) {
       Promise.resolve(opts.note).then((n) => commentary(withNote(n, ANSWER_LAST)));
     } else if (opts.request) {
@@ -693,7 +698,7 @@
     eva.pending = null;
     setStatus(text, state);
     updateButtons();
-    refreshGoogle(); // picks up a voice the agent changed by voice during the call
+    refreshMe(); // picks up a voice the agent changed by voice during the call
   }
 
   // ── pause («Дякую, Єва») / wake («Єва, скажи») ──
@@ -726,11 +731,7 @@
     eva.pauseTimer = setTimeout(async () => {
       if (eva.mode !== "waiting" || !pc) return;
       if (Date.now() - pausedAt < PAUSE_HOLD_MAX_MS) {
-        let me = null;
-        try {
-          const res = await fetch(BACKEND + "/api/me", { headers: headers() });
-          if (res.ok) me = await res.json();
-        } catch { /* offline: close as usual */ }
+        const me = await fetchMe(); // offline: close as usual
         if (eva.mode !== "waiting" || !pc) return;
         if (me && me.keep_session) { schedulePauseClose(pausedAt); return; }
       }
@@ -921,11 +922,7 @@
     teardown({ keepMic: true });
     eva.mode = "connecting";
     showState();
-    let me = null;
-    try {
-      const res = await fetch(BACKEND + "/api/me", { headers: headers() });
-      if (res.ok) me = await res.json();
-    } catch { /* offline */ }
+    const me = await fetchMe();
     if (eva.mode !== "connecting") return; // the user did something meanwhile
     if (me && me.reconnect && voices.some((x) => x.id === me.voice)) {
       voice = me.voice;
@@ -933,7 +930,7 @@
       showVoice();
       addLine("system", "Голос змінено на «" + voiceLabel(voice) + "»" + (me.voice_note ? " (" + me.voice_note + ")" : "") + ".");
       eva.mode = "switching";
-      await start(wasPaused ? { paused: true } : { switched: true, afterCommand: true });
+      await start(wasPaused ? { paused: true } : { switched: true });
       return;
     }
     if (gate) { gate.close(); gate = null; }
@@ -983,7 +980,6 @@
   async function applyVoice() {
     const id = $("voice").value;
     if (!voices.some((x) => x.id === id) || id === voice) return;
-    const interrupted = eva.mode === "active" ? speakingNow() : "";
     voice = id;
     store.set("va-voice", id);
     showVoice();
@@ -997,7 +993,7 @@
       switchVoiceFast(later);
     } else if (eva.mode === "waiting") {
       addLine("system", "Голос змінено на «" + voiceLabel(id) + "».");
-      restartSession("switching", { switched: true, interrupted });
+      restartSession("switching", { switched: true }); // paused: she is silent, nothing to continue
     }
   }
 
@@ -1044,10 +1040,11 @@
   }
 
   // announce: say «Голос змінено» when it actually switches (the user was told «зміниться»).
-  async function switchVoiceFast(announce = false) {
+  // command: asked by voice — swap as soon as the new call is up, with nothing to continue.
+  async function switchVoiceFast(announce = false, command = false) {
     dropStandby();
     if (!pc || !mic) { restartSession("switching", { switched: true }); return; }
-    const s = { voice, mark: logMark(), ready: false, announce };
+    const s = { voice, mark: logMark(), ready: false, announce, command };
     standby = s;
     const fail = () => {
       if (standby !== s) return;
@@ -1097,7 +1094,7 @@
     // only «…чи сьогодні день»). The gate notices speech a moment late and the transcript lags
     // more, so a user who spoke in the last second still counts. «Після відповіді» also waits for her.
     const userTalking = barge.speaking || Date.now() - barge.speechEndedAt < 1000 || Date.now() - eva.lastUserAt < 1000;
-    if (userTalking || (!voiceNow && stillAnswering())) {
+    if (userTalking || (!voiceNow && !s.command && stillAnswering())) {
       if (Date.now() - s.readyAt > STANDBY_WAIT_MS) { dropStandby(); switchVoiceWhenQuiet(s.announce); return; }
       voiceTimer = setTimeout(() => swapWhenQuiet(s), 100);
       return;
@@ -1110,7 +1107,7 @@
     const open = openMsg.assistant;
     // Mid-answer also counts a short gap between her sentences (the bubble is still open).
     // «Після відповіді» swaps only once she has finished: nothing to continue then.
-    const midAnswer = voiceNow && (barge.audible || Date.now() - eva.lastAudibleAt < 1500);
+    const midAnswer = voiceNow && !s.command && (barge.audible || Date.now() - eva.lastAudibleAt < 1500);
     const interrupted = open && midAnswer ? open.textContent.trim() : "";
     const said = logSince(s.mark, interrupted ? open : null);
     teardown({ keepMic: true }); // the old call: closed, its bubbles done
@@ -1134,8 +1131,7 @@
     const context = said ? "After your history ended, the conversation went on (the user heard all of it; " +
       "these replies of yours are finished — never repeat or retell them):\n" + said.slice(-1500) + "\n\n" : "";
     if (interrupted) {
-      commentary(context + "Your voice was just changed while you were saying: «" + interrupted.slice(-500) +
-        "». Continue exactly that answer in the new voice from where it stopped (its last few words may not have been heard) — do not start it over, do not mention the voice change.");
+      commentary(context + continueInNewVoice(interrupted));
     } else if (context) {
       sendEvent({ type: "session.instructions.append", delegation_id: null, event_id: eventId("ctx"),
         content: context + "Say nothing now — no acknowledgement. Wait silently for the user's next words." });
@@ -1234,8 +1230,21 @@
     audio.play().catch(stopPreview);
   }
 
-  // Heard «зміни голос …» ourselves: switch at once instead of waiting for the slower Live
-  // transcript (that path, on the server, stays as a fallback; the server dedups the two).
+  // «зміни голос …» in the Live transcript too (browsers without a recogniser, or it missed it):
+  // once the user pauses, like voice/options.py on the server — which now waits for the page.
+  function checkVoiceRequest(delta) {
+    eva.inputBuf = (eva.inputBuf + delta).slice(-300);
+    clearTimeout(eva.voiceCheckTimer);
+    if (!VOICE_REQUEST_RE.test(eva.inputBuf)) return;
+    eva.voiceCheckTimer = setTimeout(() => {
+      const text = eva.inputBuf;
+      eva.inputBuf = "";
+      if (eva.mode === "active") requestVoiceChange(text);
+    }, 900);
+  }
+
+  // Heard «зміни голос …» ourselves: the page switches without a gap; the server's own transcript
+  // check is only a fallback (it waits longer and dedups with this).
   async function requestVoiceChange(text) {
     if (eva.voiceRequestBusy) return;
     eva.voiceRequestBusy = true;
@@ -1247,7 +1256,10 @@
         store.set("va-voice", voice);
         showVoice();
         addLine("system", "Голос змінено на «" + voiceLabel(voice) + "» (почула: «" + text.trim().slice(0, 80) + "»).");
-        restartSession("switching", { switched: true });
+        // The old call goes on for a few seconds: it must not answer the request meanwhile.
+        sendEvent({ type: "session.instructions.append", delegation_id: null, event_id: eventId("voice"),
+          content: "The app is changing your voice right now. Say nothing at all and do not delegate it — stay silent." });
+        switchVoiceFast(false, true);
       }
     } catch { /* offline: the server-side path may still switch */ } finally {
       eva.voiceRequestBusy = false;
@@ -1261,13 +1273,22 @@
     restartSession("connecting", { greet: true });
   }
 
-  async function refreshGoogle() {
-    if (!BACKEND) return;
+  // The server's view of this browser (Google, voice settings, call state); null if unreachable.
+  async function fetchMe() {
     try {
       const res = await fetch(BACKEND + "/api/me", { headers: headers() });
-      if (res.status === 401) { showGate(); return; }
-      if (!res.ok) return;
-      const { google, voice: serverVoice, speed: serverSpeed, style: serverStyle } = await res.json();
+      if (res.status === 401) { showGate(); return null; }
+      return res.ok ? await res.json() : null;
+    } catch { return null; } // backend asleep / offline
+  }
+
+  // Google status plus voice settings changed on the server (asked by voice).
+  async function refreshMe() {
+    if (!BACKEND) return;
+    try {
+      const me = await fetchMe();
+      if (!me) return;
+      const { google, voice: serverVoice, speed: serverSpeed, style: serverStyle } = me;
       // Set on the server only when chosen there (e.g. asked by voice) — adopt it then.
       if (serverVoice && serverVoice !== voice && voices.some((x) => x.id === serverVoice)) {
         voice = serverVoice;
@@ -1319,14 +1340,14 @@
     const popup = window.open(url, "google-login", "width=520,height=680");
     if (!popup) { location.href = url; return; } // popup blocked → same tab
     const timer = setInterval(() => {
-      refreshGoogle();
-      if (popup.closed) { clearInterval(timer); refreshGoogle(); }
+      refreshMe();
+      if (popup.closed) { clearInterval(timer); refreshMe(); }
     }, 2000);
   }
 
   async function disconnectGoogle() {
     await fetch(BACKEND + "/api/google/disconnect", { method: "POST", headers: headers() }).catch(() => {});
-    refreshGoogle();
+    refreshMe();
   }
 
   function showGate() { $("gate").hidden = false; $("code").focus(); }
@@ -1362,10 +1383,10 @@
       accessCode = $("code").value.trim();
       store.set("va-access-code", accessCode);
       $("gate").hidden = true;
-      refreshGoogle();
+      refreshMe();
     });
     window.addEventListener("message", (e) => {
-      if (e.data && e.data.type === "google-login") refreshGoogle();
+      if (e.data && e.data.type === "google-login") refreshMe();
     });
     // Closing or leaving the tab ends the paid Live session instead of leaving it open.
     window.addEventListener("pagehide", () => { if (eva.mode !== "off") stop(); });
@@ -1375,7 +1396,7 @@
       if (cfg.access_code_required && !accessCode) showGate();
       if (!cfg.google_login) $("googleConnect").disabled = true;
       await loadVoices();
-      refreshGoogle();
+      refreshMe();
     }
     // Free Render sleeps after ~15 min without requests and forgets everyone's Google login;
     // while the page is open and visible, keep it awake.
