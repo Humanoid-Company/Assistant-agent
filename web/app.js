@@ -194,10 +194,19 @@
       node.port.onmessage = (e) => onSignal(e.data);
       const out = ctx.createMediaStreamDestination();
       ctx.createMediaStreamSource(stream).connect(node, 0, 0).connect(out);
+      let remoteSource = null;
       return {
+        stream,
         track: out.stream.getAudioTracks()[0],
-        // The assistant's audio, measured only (never played from here).
-        listenTo(remote) { ctx.createMediaStreamSource(remote).connect(node, 0, 1); },
+        // The assistant's audio, measured only (never played from here). A gate kept for the next
+        // call (voice switch) drops the old call's audio first.
+        listenTo(remote) {
+          if (remoteSource) remoteSource.disconnect();
+          remoteSource = remote ? ctx.createMediaStreamSource(remote) : null;
+          if (remoteSource) remoteSource.connect(node, 0, 1);
+        },
+        // Still usable for the next call: not closed by the browser, and running again.
+        alive() { if (ctx.state === "suspended") ctx.resume().catch(() => {}); return ctx.state !== "closed"; },
         close() { ctx.close().catch(() => {}); },
       };
     } catch {
@@ -583,9 +592,13 @@
           dropTimer = setTimeout(() => { if (pc === peer) onSessionClosed("З'єднання втрачено", "err"); }, 8000);
         } else if (state === "connected") showState();
       };
-      const newGate = await createNoiseGate(mic, onGateSignal);
-      if (my !== attempt) { if (newGate) newGate.close(); return; }
-      gate = newGate;
+      // A voice switch keeps the gate too (it is built on the same mic): no new AudioContext.
+      if (gate && (gate.stream !== mic || !gate.alive())) { gate.close(); gate = null; }
+      if (!gate) {
+        const newGate = await createNoiseGate(mic, onGateSignal);
+        if (my !== attempt) { if (newGate) newGate.close(); return; }
+        gate = newGate;
+      }
       if (gate) peer.addTrack(gate.track, mic);
       else mic.getTracks().forEach((track) => peer.addTrack(track, mic));
       channel = peer.createDataChannel("oai-events");
@@ -655,7 +668,8 @@
     clearTimeout(idleTimer);
     sendEvent({ type: "session.close" });
     if (pc) { pc.close(); pc = null; }
-    if (gate) { gate.close(); gate = null; }
+    if (gate && keepMic) gate.listenTo(null);
+    else if (gate) { gate.close(); gate = null; }
     if (mic && !keepMic) { mic.getTracks().forEach((t) => t.stop()); mic = null; }
     channel = null;
     closeBubbles();
@@ -912,6 +926,7 @@
       await start(wasPaused ? { paused: true } : { switched: true, afterCommand: true });
       return;
     }
+    if (gate) { gate.close(); gate = null; }
     if (mic) { mic.getTracks().forEach((t) => t.stop()); mic = null; }
     if (wasPaused) { eva.mode = "waiting"; startPhraseListener(); showState(); updateButtons(); return; }
     stop(text, state);
@@ -962,7 +977,8 @@
     voice = id;
     store.set("va-voice", id);
     showVoice();
-    await fetch(BACKEND + "/api/voice", { method: "POST", headers: headers(), body: JSON.stringify({ voice: id }) }).catch(() => {});
+    // Not awaited: the new call carries the voice itself (/api/session), this only keeps the server in step.
+    fetch(BACKEND + "/api/voice", { method: "POST", headers: headers(), body: JSON.stringify({ voice: id }) }).catch(() => {});
     if (eva.mode === "active" && !voiceNow && answering()) {
       addLine("system", "Голос зміниться на «" + voiceLabel(id) + "», щойно Єва договорить.");
       switchVoiceWhenQuiet();
