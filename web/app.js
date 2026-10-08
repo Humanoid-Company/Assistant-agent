@@ -1029,11 +1029,13 @@
   }
   function logSince(mark, skip) {
     const lines = [];
-    let el = mark.el ? mark.el : $("log").firstElementChild;
-    let from = mark.el ? mark.len : 0;
-    for (; el; el = el.nextElementSibling, from = 0) {
+    // The bubble open at the mark goes in whole: the history had only its start, and the model
+    // took that for an unfinished answer and told it again.
+    const whole = mark.el && mark.len < mark.el.textContent.length;
+    let el = mark.el ? (whole ? mark.el : mark.el.nextElementSibling) : $("log").firstElementChild;
+    for (; el; el = el.nextElementSibling) {
       if (el === skip || el.classList.contains("system") || el.classList.contains("empty")) continue;
-      const text = el.textContent.slice(from).trim();
+      const text = el.textContent.trim();
       if (text) lines.push((el.classList.contains("user") ? "User: " : "You: ") + text);
     }
     return lines.join("\n");
@@ -1101,7 +1103,10 @@
   async function swapIn(s) {
     standby = null;
     const open = openMsg.assistant;
-    const interrupted = speakingNow();
+    // Mid-answer also counts a short gap between her sentences (the bubble is still open).
+    // «Після відповіді» swaps only once she has finished: nothing to continue then.
+    const midAnswer = voiceNow && (barge.audible || Date.now() - eva.lastAudibleAt < 1500);
+    const interrupted = open && midAnswer ? open.textContent.trim() : "";
     const said = logSince(s.mark, interrupted ? open : null);
     teardown({ keepMic: true }); // the old call: closed, its bubbles done
     pc = s.peer;
@@ -1119,14 +1124,16 @@
     if (pc !== s.peer) return;
     setRemoteVolume(1);
     if (s.announce) addLine("system", "Голос змінено на «" + voiceLabel(s.voice) + "».");
-    if (said) {
-      // Context only (an instruction is not answered out loud): the history ended before this.
-      sendEvent({ type: "session.instructions.append", delegation_id: null, event_id: eventId("ctx"),
-        content: "The conversation went on in your previous session after this history ended — the user heard all of it, do not repeat it:\n" + said.slice(-1500) });
-    }
+    // The history ended when this call opened; what came after is handed over here. The model
+    // answers a context message out loud, so it is told plainly when to stay silent.
+    const context = said ? "After your history ended, the conversation went on (the user heard all of it; " +
+      "these replies of yours are finished — never repeat or retell them):\n" + said.slice(-1500) + "\n\n" : "";
     if (interrupted) {
-      commentary("Your voice was just changed while you were saying: «" + interrupted.slice(-500) +
+      commentary(context + "Your voice was just changed while you were saying: «" + interrupted.slice(-500) +
         "». Continue exactly that answer in the new voice from where it stopped (its last few words may not have been heard) — do not start it over, do not mention the voice change.");
+    } else if (context) {
+      sendEvent({ type: "session.instructions.append", delegation_id: null, event_id: eventId("ctx"),
+        content: context + "Say nothing now — no acknowledgement. Wait silently for the user's next words." });
     }
     showState();
     updateButtons();
