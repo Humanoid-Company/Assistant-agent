@@ -1093,8 +1093,11 @@
     voiceTimer = null;
     if (standby !== s) return;
     if (eva.mode !== "active" || !pc) { dropStandby(); if (eva.mode === "waiting") restartSession("switching", {}); return; }
-    // Never mid-sentence of the user (half of it would go to each call); «Після відповіді» also waits for her.
-    if (barge.speaking || (!voiceNow && stillAnswering())) {
+    // Never mid-sentence of the user (half of it would go to each call — prod: the new call heard
+    // only «…чи сьогодні день»). The gate notices speech a moment late and the transcript lags
+    // more, so a user who spoke in the last second still counts. «Після відповіді» also waits for her.
+    const userTalking = barge.speaking || Date.now() - barge.speechEndedAt < 1000 || Date.now() - eva.lastUserAt < 1000;
+    if (userTalking || (!voiceNow && stillAnswering())) {
       if (Date.now() - s.readyAt > STANDBY_WAIT_MS) { dropStandby(); switchVoiceWhenQuiet(s.announce); return; }
       voiceTimer = setTimeout(() => swapWhenQuiet(s), 100);
       return;
