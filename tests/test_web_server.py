@@ -492,3 +492,42 @@ def test_wake_request_goes_into_the_new_call_as_the_users_message(monkeypatch):
     assert res.status_code == 200
     last = captured["input"][-1]
     assert last["role"] == "user" and "яка в мене завтра подія" in last["content"][0]["text"]
+
+
+def test_voice_switch_keeps_the_old_call_until_the_page_swaps(monkeypatch):
+    """keep_old: the new call in another voice opens beside the talking one; the page closes the old
+    call when it swaps — and the server does it anyway if both are still open much later."""
+    monkeypatch.setattr(web, "ACCESS_CODE", "")
+    monkeypatch.setattr(web, "KEEP_OLD_MAX_S", 0.05)
+
+    class _Old:
+        session_id = "sess-old"
+        is_open = True
+        closed = False
+
+        async def close(self) -> None:
+            _Old.closed = True
+
+    async def fake_create(**_kwargs):
+        return SimpleNamespace(session=SimpleNamespace(id="sess-standby"), transport=SimpleNamespace(sdp="answer"))
+
+    async def fake_run(self):
+        self._connection = object()  # stays open
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr(web.openai_client.live, "create", fake_create)
+    monkeypatch.setattr(web.SidebandToolBridge, "run", fake_run)
+    client_id = "keep-old-0123456789ab"
+    user = web.users.get(client_id)
+    user.bridges.clear()
+    old = _Old()
+    user.bridges.add(old)
+    with TestClient(web.app) as client:
+        res = client.post("/api/session", json={"sdp": "offer", "keep_old": True}, headers={"X-Client-Id": client_id})
+        assert res.status_code == 200
+        assert not _Old.closed  # still talking while the new call comes up
+        import time
+
+        time.sleep(0.3)
+    assert _Old.closed  # the page never swapped: closed by the server
+    user.bridges.clear()

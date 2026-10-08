@@ -20,6 +20,7 @@ import os
 import re
 from contextlib import asynccontextmanager
 from datetime import date
+from typing import Any
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Query, Request
@@ -167,6 +168,20 @@ class SessionRequest(BaseModel):
     # What the user asked right after the wake phrase: goes into the new call's history as their
     # own message (a quoted commentary made GPT-Live read it back).
     user_text: str | None = None
+    # A voice switch opens the new call beside the current one: the page closes the old call
+    # itself once the new one has taken over (the old one goes on talking meanwhile).
+    keep_old: bool = False
+
+
+# A kept old call still open this long after its successor opened is closed anyway (page gone).
+KEEP_OLD_MAX_S = 120.0
+
+
+async def _close_if_replaced(old: Any, new: Any, delay_s: float) -> None:
+    await asyncio.sleep(delay_s)
+    if getattr(new, "is_open", False) and getattr(old, "is_open", False):
+        logger.info("web.session.replaced_close session_id=%s", getattr(old, "session_id", "?"))
+        await old.close()
 
 
 class VoiceRequest(BaseModel):
@@ -218,12 +233,14 @@ async def create_session(
         raise HTTPException(status_code=502, detail=f"live_create_failed: {type(exc).__name__}") from exc
     session_id = result.session.id
     # One call per browser: an older session (another tab, a page reload) would keep billing
-    # and run tools against the same account in parallel.
-    for old in list(user.bridges):
-        try:
-            await old.close()
-        except Exception:
-            logger.debug("closing old session failed", exc_info=True)
+    # and run tools against the same account in parallel. A voice switch keeps it for a moment.
+    old_bridges = list(user.bridges)
+    if not body.keep_old:
+        for old in old_bridges:
+            try:
+                await old.close()
+            except Exception:
+                logger.debug("closing old session failed", exc_info=True)
     bridge = SidebandToolBridge(
         client=openai_client,
         session_id=session_id,
@@ -237,7 +254,12 @@ async def create_session(
     task = asyncio.create_task(bridge.run())
     _background_tasks.add(task)  # keep a reference so the task isn't garbage-collected
     task.add_done_callback(_background_tasks.discard)
-    logger.info("web.session.created session_id=%s", session_id)
+    if body.keep_old:
+        for old in old_bridges:
+            closer = asyncio.create_task(_close_if_replaced(old, bridge, KEEP_OLD_MAX_S))
+            _background_tasks.add(closer)
+            closer.add_done_callback(_background_tasks.discard)
+    logger.info("web.session.created session_id=%s keep_old=%s", session_id, body.keep_old)
     return {"sdp": result.transport.sdp, "session_id": session_id}
 
 
