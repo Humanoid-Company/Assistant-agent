@@ -83,7 +83,7 @@ label { display: block; font-weight: 600; margin-bottom: 6px; }
 .dot.speak { background: var(--accent); animation: pulse 0.6s infinite; }
 .call .row { margin-top: 8px; }
 .call .row .btn { flex: 1 1 140px; }
-.settings { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 12px 0; }
+.settings { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 16px 0 12px; }
 .settings select { width: 100%; }
 input[type="range"] { width: 100%; padding: 0; border: 0; background: none; accent-color: var(--accent); }
 .small-btn { padding: 4px 10px; font-size: 0.85rem; }
