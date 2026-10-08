@@ -26,10 +26,13 @@
   let volume = parseFloat(store.get("va-volume") || "1");
   // Keep what is said nearby during a pause (voice/background.py); the user can turn it off.
   let bgListen = store.get("va-bg-listen") !== "0";
+  // A voice picked while Єва answers: switch at once (she goes on in the new voice) or once she is done.
+  let voiceNow = store.get("va-voice-now") !== "0";
   if (!(volume >= 0 && volume <= 1)) volume = 1;
 
   let pc = null;
   let channel = null;
+  let sessionVoice = ""; // the voice the current call was opened with
   let mic = null;
   let gate = null;
   // One open bubble per speaker: user and assistant transcripts arrive interleaved when they
@@ -591,6 +594,7 @@
 
       const offer = await peer.createOffer();
       await peer.setLocalDescription(offer);
+      sessionVoice = voice;
       const res = await fetch(BACKEND + "/api/session", {
         method: "POST",
         headers: headers(),
@@ -959,10 +963,38 @@
     store.set("va-voice", id);
     showVoice();
     await fetch(BACKEND + "/api/voice", { method: "POST", headers: headers(), body: JSON.stringify({ voice: id }) }).catch(() => {});
-    if (eva.mode === "active" || eva.mode === "waiting") {
+    if (eva.mode === "active" && !voiceNow && answering()) {
+      addLine("system", "Голос зміниться на «" + voiceLabel(id) + "», щойно Єва договорить.");
+      switchVoiceWhenQuiet();
+    } else if (eva.mode === "active" || eva.mode === "waiting") {
       addLine("system", "Голос змінено на «" + voiceLabel(id) + "».");
       restartSession("switching", { switched: true, interrupted });
     }
+  }
+
+  // «Після відповіді»: the new voice waits until she has finished (same quiet rule as speed/style).
+  let voiceTimer = null;
+  function switchVoiceWhenQuiet() {
+    clearTimeout(voiceTimer);
+    voiceTimer = null;
+    if (sessionVoice === voice || eva.mode === "off" || eva.mode === "connecting" || eva.mode === "switching") return; // a new call already has it
+    if (eva.mode === "active" && !voiceNow && answering()) { voiceTimer = setTimeout(switchVoiceWhenQuiet, 300); return; }
+    addLine("system", "Голос змінено на «" + voiceLabel(voice) + "».");
+    restartSession("switching", { switched: true, interrupted: eva.mode === "active" ? speakingNow() : "" });
+  }
+
+  function showVoiceNow() {
+    $("voiceNow").checked = voiceNow;
+    $("voiceNowInfo").textContent = voiceNow
+      ? "Одразу: Єва договорить відповідь уже новим голосом."
+      : "Після відповіді: новий голос — коли Єва договорить.";
+  }
+
+  function toggleVoiceNow() {
+    voiceNow = $("voiceNow").checked;
+    store.set("va-voice-now", voiceNow ? "1" : "0");
+    showVoiceNow();
+    if (voiceNow && voiceTimer) switchVoiceWhenQuiet(); // a waiting switch happens now
   }
 
   // Speed and manner are instructions to the model. One that arrives while she talks derails the
@@ -971,6 +1003,8 @@
   let pendingDelivery = "";
   let deliveryTimer = null;
   const DELIVERY_QUIET_MS = 2500;
+  // She is talking, thinking, or stopped only a moment ago (between sentences).
+  const answering = () => barge.audible || barge.speaking || eva.thinking || Date.now() - eva.lastAudibleAt < DELIVERY_QUIET_MS;
 
   async function applyDelivery() {
     speed = $("speed").value;
@@ -996,8 +1030,7 @@
     clearTimeout(deliveryTimer);
     if (!pendingDelivery) return;
     if (!channel || eva.mode !== "active") { pendingDelivery = ""; return; } // a new session gets them at start
-    const quietFor = Date.now() - eva.lastAudibleAt;
-    if (barge.audible || barge.speaking || eva.thinking || quietFor < DELIVERY_QUIET_MS) {
+    if (answering()) {
       deliveryTimer = setTimeout(sendDeliveryWhenQuiet, 300);
       return;
     }
@@ -1130,6 +1163,8 @@
     $("resume").addEventListener("click", () => wakeEva(""));
     $("bgListen").addEventListener("change", toggleBgListen);
     showBgListen();
+    $("voiceNow").addEventListener("change", toggleVoiceNow);
+    showVoiceNow();
     $("newChat").addEventListener("click", newConversation);
     $("voice").addEventListener("change", () => { stopPreview(); showVoice(true); });
     $("voicePreview").addEventListener("click", togglePreview);
