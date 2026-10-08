@@ -68,7 +68,7 @@ from voice.conversation import ConversationLog
 from voice.factory import normalize_voice_engine
 from voice.live_driver import LiveDriverMixin
 from voice.live_session import LiveVoiceSession
-from voice.options import LANGUAGE_OPTIONS, VOICE_OPTIONS
+from voice.options import LANGUAGE_OPTIONS, LANGUAGE_REFUSAL, VOICE_OPTIONS
 from voice.realtime_driver import RealtimeDriverMixin
 from voice.wake_phrases import match_wake
 
@@ -357,7 +357,7 @@ class Assistant(RealtimeDriverMixin, LiveDriverMixin):
         "language" (the instructions text and the input transcription hint)
         can be updated live via session.update."""
         if language not in LANGUAGE_OPTIONS:
-            return f"Мова {language!r} не підтримується — скажи користувачу спробувати ще раз."
+            return LANGUAGE_REFUSAL
         self._memory["language"] = language
         self._save_memory()
         if self.rt is not None:

@@ -554,3 +554,16 @@ def test_prompt_variant_v2_is_used_only_when_the_page_asks(monkeypatch):
     for text in (v1, v2):  # the shared parts stay in both
         assert "Voice changes:" in text and "Interruption policy" in text
     web.users.get(headers["X-Client-Id"]).bridges.clear()
+
+
+def test_never_russian():
+    """A team decision: no Russian, not even when the user asks for it."""
+    from prompts.live_prompt import build_live_prompt
+    from tools.live_schemas import LIVE_BACKEND_TOOLS
+    from voice.options import LANGUAGE_OPTIONS
+
+    assert "ru" not in LANGUAGE_OPTIONS
+    tool = next(t for t in LIVE_BACKEND_TOOLS if t.get("name") == "change_language")
+    assert "ru" not in str(tool)
+    prompt = build_live_prompt(language_name="українською", assistant_name=None, today="2026-10-08")
+    assert "Never speak Russian" in prompt
