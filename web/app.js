@@ -30,6 +30,8 @@
   let voiceNow = store.get("va-voice-now") !== "0";
   if (!(volume >= 0 && volume <= 1)) volume = 1;
 
+  // ?prompt=v2: try the experimental delivery prompt (prompts/live_prompt.py) instead of the usual one.
+  const PROMPT_VARIANT = params.get("prompt") || undefined;
   let pc = null;
   let channel = null;
   let sessionVoice = ""; // the voice the current call was opened with
@@ -598,7 +600,7 @@
       const res = await fetch(BACKEND + "/api/session", {
         method: "POST",
         headers: headers(),
-        body: JSON.stringify({ sdp: offer.sdp, voice: voice || undefined, speed, style, user_text: opts.userText || undefined }),
+        body: JSON.stringify({ sdp: offer.sdp, voice: voice || undefined, speed, style, prompt: PROMPT_VARIANT, user_text: opts.userText || undefined }),
       });
       if (my !== attempt) return;
       if (res.status === 401) {
@@ -1074,7 +1076,7 @@
         method: "POST",
         headers: headers(),
         // keep_old: the current call goes on until the page swaps (the server would end it).
-        body: JSON.stringify({ sdp: offer.sdp, voice: s.voice, speed, style, keep_old: true }),
+        body: JSON.stringify({ sdp: offer.sdp, voice: s.voice, speed, style, prompt: PROMPT_VARIANT, keep_old: true }),
       });
       if (standby !== s) return;
       if (!res.ok) throw new Error("session " + res.status);

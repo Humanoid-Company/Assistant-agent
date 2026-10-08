@@ -43,7 +43,7 @@ from config import (
     OPENAI_LIVE_VOICE,
 )
 from prompts.backend_prompt import build_backend_prompt
-from prompts.live_prompt import build_live_prompt
+from prompts.live_prompt import PROMPT_VARIANTS, build_live_prompt
 from server.live_bridge import SidebandToolBridge
 from server.web_users import WebUser, WebUserRegistry
 from tools.live_schemas import LIVE_BACKEND_TOOLS
@@ -140,6 +140,7 @@ def _session_config(user: WebUser) -> dict:
             today=today,
             voice=voice,
             delivery=delivery_instruction(user.speed, user.style),
+            variant=user.prompt_variant,
         )
         + _WEB_NOTE,
         "audio": {"output": {"voice": voice}},
@@ -171,6 +172,8 @@ class SessionRequest(BaseModel):
     # A voice switch opens the new call beside the current one: the page closes the old call
     # itself once the new one has taken over (the old one goes on talking meanwhile).
     keep_old: bool = False
+    # Delivery-prompt experiment (?prompt=v2 on the page).
+    prompt: str | None = None
 
 
 # A kept old call still open this long after its successor opened is closed anyway (page gone).
@@ -220,6 +223,7 @@ async def create_session(
         user.speed = body.speed
     if body.style in STYLE_OPTIONS:
         user.style = body.style
+    user.prompt_variant = body.prompt if body.prompt in PROMPT_VARIANTS else "v1"
     user.reconnect_pending = False
     if body.user_text and body.user_text.strip():
         user.conversation.add("user", body.user_text.strip()[:500])

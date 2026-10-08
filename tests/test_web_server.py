@@ -531,3 +531,25 @@ def test_voice_switch_keeps_the_old_call_until_the_page_swaps(monkeypatch):
         time.sleep(0.3)
     assert _Old.closed  # the page never swapped: closed by the server
     user.bridges.clear()
+
+
+def test_prompt_variant_v2_is_used_only_when_the_page_asks(monkeypatch):
+    monkeypatch.setattr(web, "ACCESS_CODE", "")
+    sent: list[str] = []
+
+    async def fake_create(*, session, transport):
+        sent.append(session["instructions"])
+        return SimpleNamespace(session=SimpleNamespace(id=f"sess-p{len(sent)}"), transport=SimpleNamespace(sdp="answer"))
+
+    monkeypatch.setattr(web.openai_client.live, "create", fake_create)
+    monkeypatch.setattr(web.SidebandToolBridge, "run", lambda self: asyncio.sleep(0))
+    headers = {"X-Client-Id": "prompt-var-0123456789ab"}
+    client = TestClient(web.app)
+    for body in ({"sdp": "o", "prompt": "v2"}, {"sdp": "o"}, {"sdp": "o", "prompt": "nonsense"}):
+        assert client.post("/api/session", headers=headers, json=body).status_code == 200
+    v2, v1, fallback = sent
+    assert "you are talking, not reading" in v2 and "audiobook" in v2
+    assert "you are talking, not reading" not in v1 and v1 == fallback
+    for text in (v1, v2):  # the shared parts stay in both
+        assert "Voice changes:" in text and "Interruption policy" in text
+    web.users.get(headers["X-Client-Id"]).bridges.clear()
