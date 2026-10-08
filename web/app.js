@@ -580,18 +580,6 @@
         $("remote").srcObject = e.streams[0];
         if (gate) gate.listenTo(e.streams[0]);
       };
-      peer.onconnectionstatechange = () => {
-        if (pc !== peer) return;
-        const state = peer.connectionState;
-        clearTimeout(dropTimer);
-        // The server ends the call itself to restart it in a new voice: check before giving up.
-        if (state === "failed" || state === "closed") onSessionClosed("З'єднання втрачено", "err");
-        // "disconnected" is often a network blip that recovers by itself (Wi-Fi switch etc.).
-        else if (state === "disconnected") {
-          setStatus("Зв'язок перервався — відновлюю…", "busy");
-          dropTimer = setTimeout(() => { if (pc === peer) onSessionClosed("З'єднання втрачено", "err"); }, 8000);
-        } else if (state === "connected") showState();
-      };
       // A voice switch keeps the gate too (it is built on the same mic): no new AudioContext.
       if (gate && (gate.stream !== mic || !gate.alive())) { gate.close(); gate = null; }
       if (!gate) {
@@ -602,8 +590,7 @@
       if (gate) peer.addTrack(gate.track, mic);
       else mic.getTracks().forEach((track) => peer.addTrack(track, mic));
       channel = peer.createDataChannel("oai-events");
-      channel.onmessage = (e) => { if (pc === peer) onServerEvent(e.data); };
-      channel.onclose = () => { if (pc === peer && eva.mode !== "connecting" && eva.mode !== "switching") onSessionClosed(); };
+      wireCall(peer, channel);
 
       const offer = await peer.createOffer();
       await peer.setLocalDescription(offer);
@@ -628,6 +615,24 @@
       addLine("system", msg);
       stop("Не вдалося підключитись", "err");
     }
+  }
+
+  // The current call's connection and server events (a standby call gets them when swapped in).
+  function wireCall(peer, ch) {
+    peer.onconnectionstatechange = () => {
+      if (pc !== peer) return;
+      const state = peer.connectionState;
+      clearTimeout(dropTimer);
+      // The server ends the call itself to restart it in a new voice: check before giving up.
+      if (state === "failed" || state === "closed") onSessionClosed("З'єднання втрачено", "err");
+      // "disconnected" is often a network blip that recovers by itself (Wi-Fi switch etc.).
+      else if (state === "disconnected") {
+        setStatus("Зв'язок перервався — відновлюю…", "busy");
+        dropTimer = setTimeout(() => { if (pc === peer) onSessionClosed("З'єднання втрачено", "err"); }, 8000);
+      } else if (state === "connected") showState();
+    };
+    ch.onmessage = (e) => { if (pc === peer) onServerEvent(e.data); };
+    ch.onclose = () => { if (pc === peer && eva.mode !== "connecting" && eva.mode !== "switching") onSessionClosed(); };
   }
 
   // session.started: the call is up — pause, or talk.
@@ -678,6 +683,7 @@
   }
 
   function stop(text = "Не підключено", state = "") {
+    dropStandby();
     teardown();
     stopPhraseListener();
     clearTimeout(eva.pauseTimer);
@@ -897,6 +903,7 @@
     const paused = eva.mode === "waiting";
     if (eva.mode === "off" || eva.mode === "connecting") return;
     if (paused && !pc) return; // closed during a pause: the next «Єва, скажи» opens it fresh
+    dropStandby();
     clearTimeout(eva.pauseTimer);
     teardown({ keepMic: true });
     eva.mode = mode;
@@ -908,6 +915,7 @@
   async function onSessionClosed(text = "Розмову завершено", state = "") {
     if (eva.mode === "switching" || eva.mode === "off" || eva.mode === "connecting") return;
     const wasPaused = eva.mode === "waiting";
+    dropStandby();
     teardown({ keepMic: true });
     eva.mode = "connecting";
     showState();
@@ -979,23 +987,159 @@
     showVoice();
     // Not awaited: the new call carries the voice itself (/api/session), this only keeps the server in step.
     fetch(BACKEND + "/api/voice", { method: "POST", headers: headers(), body: JSON.stringify({ voice: id }) }).catch(() => {});
-    if (eva.mode === "active" && !voiceNow && answering()) {
-      addLine("system", "Голос зміниться на «" + voiceLabel(id) + "», щойно Єва договорить.");
-      switchVoiceWhenQuiet();
-    } else if (eva.mode === "active" || eva.mode === "waiting") {
+    if (eva.mode === "active") {
+      const later = !voiceNow && answering();
+      addLine("system", later
+        ? "Голос зміниться на «" + voiceLabel(id) + "», щойно Єва договорить."
+        : "Голос змінено на «" + voiceLabel(id) + "».");
+      switchVoiceFast(later);
+    } else if (eva.mode === "waiting") {
       addLine("system", "Голос змінено на «" + voiceLabel(id) + "».");
       restartSession("switching", { switched: true, interrupted });
     }
   }
 
-  // «Після відповіді»: the new voice waits until she has finished (same quiet rule as speed/style).
+  // ── fast voice switch ──
+  // Opening a GPT-Live session takes seconds and its voice is fixed, so the call in the new voice
+  // opens beside the current one — it hears nothing and plays nothing — while Єва goes on talking.
+  // Once it is up it takes over the mic and the speaker («Одразу»), or waits until she has finished
+  // («Після відповіді»). What the old call said meanwhile is handed over, so nothing is lost.
+  let standby = null;
   let voiceTimer = null;
-  function switchVoiceWhenQuiet() {
+  const STANDBY_WAIT_MS = 60 * 1000; // a ready call waiting for her to finish — longer: start over
+  // A swap doesn't derail her (unlike speed/style), so a short silence is enough: her answer is over.
+  const SWAP_QUIET_MS = 800;
+  const stillAnswering = () => barge.audible || eva.thinking || Date.now() - eva.lastAudibleAt < SWAP_QUIET_MS;
+
+  function dropStandby() {
+    clearTimeout(voiceTimer);
+    voiceTimer = null;
+    const s = standby;
+    standby = null;
+    if (!s) return;
+    clearTimeout(s.timer);
+    try { if (s.channel.readyState === "open") s.channel.send(JSON.stringify({ type: "session.close" })); } catch { /* closing */ }
+    s.peer.close();
+  }
+
+  // The log from `mark` on: what the old call said / heard after the new one got the history.
+  function logMark() {
+    const last = $("log").lastElementChild;
+    return { el: last, len: last ? last.textContent.length : 0 };
+  }
+  function logSince(mark, skip) {
+    const lines = [];
+    let el = mark.el ? mark.el : $("log").firstElementChild;
+    let from = mark.el ? mark.len : 0;
+    for (; el; el = el.nextElementSibling, from = 0) {
+      if (el === skip || el.classList.contains("system") || el.classList.contains("empty")) continue;
+      const text = el.textContent.slice(from).trim();
+      if (text) lines.push((el.classList.contains("user") ? "User: " : "You: ") + text);
+    }
+    return lines.join("\n");
+  }
+
+  // announce: say «Голос змінено» when it actually switches (the user was told «зміниться»).
+  async function switchVoiceFast(announce = false) {
+    dropStandby();
+    if (!pc || !mic) { restartSession("switching", { switched: true }); return; }
+    const s = { voice, mark: logMark(), ready: false, announce };
+    standby = s;
+    const fail = () => {
+      if (standby !== s) return;
+      dropStandby();
+      switchVoiceWhenQuiet(s.announce); // the old way: reconnect (once she is quiet, if asked to wait)
+    };
+    s.timer = setTimeout(fail, 15000);
+    try {
+      const peer = new RTCPeerConnection();
+      s.peer = peer;
+      peer.ontrack = (e) => { s.stream = e.streams[0]; };
+      // No mic until the swap: replaceTrack later needs no renegotiation.
+      s.sender = peer.addTransceiver("audio", { direction: "sendrecv" }).sender;
+      s.channel = peer.createDataChannel("oai-events");
+      s.channel.onmessage = (e) => {
+        if (standby !== s) return;
+        let event;
+        try { event = JSON.parse(e.data); } catch { return; }
+        if (event.type === "session.started") { s.ready = true; s.readyAt = Date.now(); clearTimeout(s.timer); swapWhenQuiet(s); }
+        else if (event.type === "session.closed") fail();
+      };
+      s.channel.onclose = fail;
+      const offer = await peer.createOffer();
+      await peer.setLocalDescription(offer);
+      const res = await fetch(BACKEND + "/api/session", {
+        method: "POST",
+        headers: headers(),
+        // keep_old: the current call goes on until the page swaps (the server would end it).
+        body: JSON.stringify({ sdp: offer.sdp, voice: s.voice, speed, style, keep_old: true }),
+      });
+      if (standby !== s) return;
+      if (!res.ok) throw new Error("session " + res.status);
+      const { sdp } = await res.json();
+      if (standby !== s) return;
+      await peer.setRemoteDescription({ type: "answer", sdp });
+    } catch {
+      fail();
+    }
+  }
+
+  function swapWhenQuiet(s) {
+    clearTimeout(voiceTimer);
+    voiceTimer = null;
+    if (standby !== s) return;
+    if (eva.mode !== "active" || !pc) { dropStandby(); if (eva.mode === "waiting") restartSession("switching", {}); return; }
+    // Never mid-sentence of the user (half of it would go to each call); «Після відповіді» also waits for her.
+    if (barge.speaking || (!voiceNow && stillAnswering())) {
+      if (Date.now() - s.readyAt > STANDBY_WAIT_MS) { dropStandby(); switchVoiceWhenQuiet(s.announce); return; }
+      voiceTimer = setTimeout(() => swapWhenQuiet(s), 100);
+      return;
+    }
+    swapIn(s);
+  }
+
+  async function swapIn(s) {
+    standby = null;
+    const open = openMsg.assistant;
+    const interrupted = speakingNow();
+    const said = logSince(s.mark, interrupted ? open : null);
+    teardown({ keepMic: true }); // the old call: closed, its bubbles done
+    pc = s.peer;
+    channel = s.channel;
+    sessionVoice = s.voice;
+    wireCall(s.peer, s.channel);
+    if (s.stream) {
+      $("remote").srcObject = s.stream;
+      if (gate) gate.listenTo(s.stream);
+    }
+    s.peer.ontrack = (e) => { $("remote").srcObject = e.streams[0]; if (gate) gate.listenTo(e.streams[0]); };
+    try {
+      await s.sender.replaceTrack(gate ? gate.track : mic.getAudioTracks()[0]);
+    } catch { /* closed meanwhile: its close handler takes over */ }
+    if (pc !== s.peer) return;
+    setRemoteVolume(1);
+    if (s.announce) addLine("system", "Голос змінено на «" + voiceLabel(s.voice) + "».");
+    if (said) {
+      // Context only (an instruction is not answered out loud): the history ended before this.
+      sendEvent({ type: "session.instructions.append", delegation_id: null, event_id: eventId("ctx"),
+        content: "The conversation went on in your previous session after this history ended — the user heard all of it, do not repeat it:\n" + said.slice(-1500) });
+    }
+    if (interrupted) {
+      commentary("Your voice was just changed while you were saying: «" + interrupted.slice(-500) +
+        "». Continue exactly that answer in the new voice from where it stopped (its last few words may not have been heard) — do not start it over, do not mention the voice change.");
+    }
+    showState();
+    updateButtons();
+    touchActivity();
+  }
+
+  // Without a standby call: reconnect in the new voice, once she is quiet if asked to wait.
+  function switchVoiceWhenQuiet(announce = false) {
     clearTimeout(voiceTimer);
     voiceTimer = null;
     if (sessionVoice === voice || eva.mode === "off" || eva.mode === "connecting" || eva.mode === "switching") return; // a new call already has it
-    if (eva.mode === "active" && !voiceNow && answering()) { voiceTimer = setTimeout(switchVoiceWhenQuiet, 300); return; }
-    addLine("system", "Голос змінено на «" + voiceLabel(voice) + "».");
+    if (eva.mode === "active" && !voiceNow && answering()) { voiceTimer = setTimeout(() => switchVoiceWhenQuiet(announce), 300); return; }
+    if (announce) addLine("system", "Голос змінено на «" + voiceLabel(voice) + "».");
     restartSession("switching", { switched: true, interrupted: eva.mode === "active" ? speakingNow() : "" });
   }
 
@@ -1010,7 +1154,9 @@
     voiceNow = $("voiceNow").checked;
     store.set("va-voice-now", voiceNow ? "1" : "0");
     showVoiceNow();
-    if (voiceNow && voiceTimer) switchVoiceWhenQuiet(); // a waiting switch happens now
+    // A waiting switch happens now.
+    if (voiceNow && standby && standby.ready) swapWhenQuiet(standby);
+    else if (voiceNow && voiceTimer && !standby) switchVoiceWhenQuiet(true);
   }
 
   // Speed and manner are instructions to the model. One that arrives while she talks derails the
