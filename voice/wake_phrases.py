@@ -18,6 +18,7 @@ AGENT_NAME = "Єва"
 _NAME_FORMS = frozenset({
     "єва", "єво",
     "ева", "эва", "эво", "ево", "єфа", "ефа",
+    "їва", "іва", "йева", "йєва", "єєва",  # Chrome's uk-UA spellings of a quick «Єва»
     "eva", "evo", "eve", "yeva", "yevo", "jeva",
 })
 # The name plus one of these wakes her. The name alone does not: talking ABOUT Єва mustn't.
@@ -44,8 +45,21 @@ def _tokens(text: str) -> list[str]:
         if merged and merged[-1] in ("є", "е", "э") and word == "ва":
             merged[-1] += word
         else:
-            merged.append(word)
+            merged.extend(_unglue(word))
     return merged
+
+
+def _unglue(word: str) -> list[str]:
+    """«привітєва» / «гейєва» / «євоскажи»: the recogniser glued the name to the verb — split them."""
+    if len(word) <= 4 or word in _NAME_FORMS:
+        return [word]
+    verbs = _WAKE_VERBS + _STOP_VERBS
+    for size in (4, 3):
+        if word[-size:] in _NAME_FORMS and _like(word[:-size], verbs):
+            return [word[:-size], word[-size:]]
+        if word[:size] in _NAME_FORMS and _like(word[size:], verbs):
+            return [word[:size], word[size:]]
+    return [word]
 
 
 def _is_name(word: str) -> bool:

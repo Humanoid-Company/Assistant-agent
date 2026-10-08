@@ -221,7 +221,8 @@
   // Same rules as voice/wake_phrases.py — keep the two in sync (tests/test_eva_phrases.py has the
   // cases). The name is matched against a list (fuzzy matching a 3-letter word would accept
   // «два»), the verbs fuzzily, like Python's difflib ratio ≥ 0.75.
-  const EVA_NAME_FORMS = new Set(["єва", "єво", "ева", "эва", "эво", "ево", "єфа", "ефа", "eva", "evo", "eve", "yeva", "yevo", "jeva"]);
+  const EVA_NAME_FORMS = new Set(["єва", "єво", "ева", "эва", "эво", "ево", "єфа", "ефа", "їва", "іва", "йева", "йєва", "єєва",
+    "eva", "evo", "eve", "yeva", "yevo", "jeva"]);
   const EVA_WAKE_VERBS = [
     "скажи", "кажи", "скажіть", "скажи-но",
     "привіт", "привітик", "вітаю", "гей", "хей", "агов", "алло",
@@ -238,9 +239,20 @@
     for (const word of words) {
       const last = merged[merged.length - 1];
       if ((last === "є" || last === "е" || last === "э") && word === "ва") merged[merged.length - 1] = last + word;
-      else merged.push(word);
+      else merged.push(...unglue(word));
     }
     return merged;
+  }
+
+  // «привітєва» / «гейєва» / «євоскажи»: the recogniser glued the name to the verb — split them.
+  function unglue(word) {
+    if (word.length <= 4 || EVA_NAME_FORMS.has(word)) return [word];
+    const verbs = EVA_WAKE_VERBS.concat(EVA_STOP_VERBS);
+    for (const size of [4, 3]) {
+      if (EVA_NAME_FORMS.has(word.slice(-size)) && like(word.slice(0, -size), verbs)) return [word.slice(0, -size), word.slice(-size)];
+      if (EVA_NAME_FORMS.has(word.slice(0, size)) && like(word.slice(size), verbs)) return [word.slice(0, size), word.slice(size)];
+    }
+    return [word];
   }
 
   // difflib.SequenceMatcher.ratio(): 2·matches / total length, matches = longest common blocks.
