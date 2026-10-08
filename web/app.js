@@ -30,6 +30,7 @@
   let voiceNow = store.get("va-voice-now") !== "0";
   if (!(volume >= 0 && volume <= 1)) volume = 1;
 
+  const DEBUG = params.get("debug") === "1";
   // ?prompt=v2: try the experimental delivery prompt (prompts/live_prompt.py) instead of the usual one.
   const PROMPT_VARIANT = params.get("prompt") || undefined;
   let pc = null;
@@ -108,7 +109,9 @@
       constructor(options) {
         super();
         this.frame = Math.round(sampleRate * 0.02);       // judge loudness per 20 ms
-        this.ring = new Float32Array(Math.round(sampleRate * 0.06)); // 60 ms look-ahead
+        // 150 ms look-ahead: the gate opens on voiced sound, and a soft start before it («с», «ф»,
+        // «х», «п» — «Скажи», «Привіт») was cut at 60 ms and misheard.
+        this.ring = new Float32Array(Math.round(sampleRate * 0.15));
         this.pos = 0; this.sum = 0; this.outSum = 0; this.count = 0;
         this.floor = 0.003; this.open = false; this.loud = 0; this.quietFor = 1;
         this.gain = 0;
@@ -141,7 +144,8 @@
         if (level > threshold) { this.loud += 1; this.quietFor = 0; }
         else { this.quietFor += 0.02; if (level < threshold * 0.6) this.loud = 0; }
         if (!this.open && this.loud >= 2) this.open = true;
-        else if (this.open && this.quietFor > 0.45) this.open = false;
+        // 0.6 s: a quiet word ending or a short pause mid-sentence is not cut off.
+        else if (this.open && this.quietFor > 0.6) this.open = false;
         const nearThreshold = Math.max(audible ? this.near * 1.3 : this.near, this.floor * 8, echoLevel * 1.3);
         if (level > nearThreshold) { this.nearFrames += 1; this.nearQuietFor = 0; }
         else { this.nearQuietFor += 0.02; if (this.nearQuietFor > 0.25) this.nearFrames = 0; }
@@ -873,6 +877,8 @@
             requestVoiceChange(text);
             return;
           }
+          // ?debug=1: what the browser heard during the pause — shows why a wake phrase was missed.
+          if (DEBUG && eva.mode === "waiting" && result.isFinal) addLine("system", "браузер почув: «" + text.trim() + "»");
           // Wake on the final text only: it carries the whole request after «Єва, скажи».
           if (eva.mode === "waiting" && result.isFinal) {
             const rest = matchWake(text);
@@ -1201,7 +1207,7 @@
   }
 
   // ?debug=1: evaDebug() in the console shows the page's state.
-  if (params.get("debug") === "1") {
+  if (DEBUG) {
     window.evaDebug = () => ({
       mode: eva.mode, pendingDelivery, audible: barge.audible, speaking: barge.speaking,
       thinking: eva.thinking, quietMs: Date.now() - eva.lastAudibleAt, channel: channel && channel.readyState,
