@@ -73,24 +73,26 @@ VOICE_PERSONAS: dict[str, VoicePersona] = {
             "gleam", "Глім",
             "Жіночий, записаний з живого голосу. Світлий, активний і привітний — голос за замовчуванням.",
             True,
-            "A bright, friendly woman around thirty with a clear, warm, melodic voice. Engaged "
-            "and attentive, with a light smile in the voice — lively but never bubbly or rushed.",
+            "A bright, friendly woman around thirty chatting with a friend: a clear, warm voice with a "
+            "smile you can hear. Quick and lively in small talk, slower and clearer on what matters — "
+            "never bubbly, never rushed.",
             _F_SAMPLES,
         ),
         VoicePersona(
             "bossa", "Боса",
             "Жіночий, записаний з живого голосу. Жвавий, емоційний і теплий — з енергією та усмішкою.",
             True,
-            "A warm, expressive woman with a rich, rounded voice and an easy, soft laugh. Melodic "
-            "intonation with gentle ups and downs; genuinely glad about good news without shouting.",
+            "A warm, expressive woman with a rich voice and an easy, soft laugh. She reacts to what she "
+            "hears — glad, surprised, sympathetic — and her intonation follows it; happy about good news "
+            "without shouting.",
             _F_SAMPLES,
         ),
         VoicePersona(
             "willow", "Віллоу",
             "Жіночий, записаний з живого голосу. М'який, мелодійний і спокійний — для неспішних розмов.",
             True,
-            "A gentle, melodic woman with a soft, calm voice. Unhurried and soothing, speaking in a "
-            "smooth continuous flow, warm and reassuring.",
+            "A gentle, soft-spoken woman, calm but present — like a close friend talking late in the "
+            "evening. Quiet warmth and real interest in the person, never a narrator's evenness.",
             _F_SAMPLES,
         ),
         VoicePersona(
@@ -107,8 +109,8 @@ VOICE_PERSONAS: dict[str, VoicePersona] = {
             "meridian", "Меридіан",
             "Чоловічий, записаний з живого голосу. Рівний, теплий і надійний — універсальний помічник.",
             False,
-            "A warm, steady, reliable man around thirty-five. Clear and natural, friendly and "
-            "confident, at an even conversational pace.",
+            "A warm, reliable man around thirty-five talking to a friend: confident and natural, plain "
+            "words, an easy mood, intonation that follows what he says.",
             _M_SAMPLES,
         ),
         VoicePersona(
@@ -123,8 +125,8 @@ VOICE_PERSONAS: dict[str, VoicePersona] = {
             "stone", "Стоун",
             "Чоловічий, записаний з живого голосу. Низький, басистий і спокійний.",
             False,
-            "A calm man with a deep, bassy voice. Relaxed and unhurried, grounded and reassuring, "
-            "speaking in a smooth continuous flow.",
+            "A calm man with a deep, low voice — relaxed and grounded, talking easily like to a friend, "
+            "never announcing or narrating.",
             _M_SAMPLES,
         ),
         VoicePersona(
@@ -139,16 +141,16 @@ VOICE_PERSONAS: dict[str, VoicePersona] = {
             "verse", "Верс",
             "Чоловічий. Активний і жвавий — за енергією схожий на Глім.",
             False,
-            "An active, friendly man with a bright, warm voice. Engaged and positive, a lively "
-            "but unhurried pace, smooth expressive intonation.",
+            "An active, friendly man with a bright, warm voice. Engaged and positive, lively, with "
+            "intonation that moves with what he says.",
             _M_SAMPLES,
         ),
         VoicePersona(
             "cedar", "Кедр",
             "Чоловічий, глибокий і впевнений. Спокійний низький голос, неквапливий, з легким гумором.",
             False,
-            "A calm, grounded man in his thirties with a low, relaxed voice. Unhurried and confident, "
-            "never stiff — like a friend who is good at sorting things out. Occasional dry humour.",
+            "A calm, grounded man in his thirties with a low, relaxed voice. Confident, never stiff — "
+            "like a friend who is good at sorting things out. Occasional dry humour.",
             _M_SAMPLES,
         ),
     )
