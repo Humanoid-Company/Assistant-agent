@@ -25,7 +25,7 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
@@ -33,6 +33,8 @@ from auth.google_oauth import GoogleOAuthClient
 from auth.token_store import InMemoryTokenStore
 from auth.web_oauth import WebOAuth
 from config import (
+    ELEVENLABS_MODEL,
+    ELEVENLABS_VOICE_ID,
     GOOGLE_CALENDAR_TIMEZONE,
     GOOGLE_OAUTH_CLIENT_SECRETS_FILE,
     OPENAI_API_KEY,
@@ -42,8 +44,17 @@ from config import (
     OPENAI_LIVE_PARALLEL_TOOLS,
     OPENAI_LIVE_VOICE,
 )
-from prompts.backend_prompt import build_backend_prompt
-from prompts.live_prompt import PROMPT_VARIANTS, build_live_prompt
+from prompts.backend_prompt import build_backend_prompt, build_tool_rules
+from prompts.live_prompt import PROMPT_VARIANTS, build_eleven_prompt, build_live_prompt
+from server.eleven import (
+    ELEVEN_MODELS,
+    ElevenLabs,
+    ElevenLabsError,
+    RealtimeToolBridge,
+    TtsRequest,
+    history_items,
+    realtime_session,
+)
 from server.live_bridge import SidebandToolBridge
 from server.web_users import WebUser, WebUserRegistry
 from tools.live_schemas import LIVE_BACKEND_TOOLS
@@ -106,6 +117,7 @@ app.add_middleware(
 )
 
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+eleven = ElevenLabs()
 users = WebUserRegistry(client_secrets_file=GOOGLE_OAUTH_CLIENT_SECRETS_FILE, timezone=GOOGLE_CALENDAR_TIMEZONE)
 web_oauth = WebOAuth(
     client_id=os.getenv("GOOGLE_OAUTH_WEB_CLIENT_ID", ""),
@@ -206,7 +218,11 @@ def healthz() -> dict:
 @app.get("/api/config")
 def public_config() -> dict:
     """What the page needs to know before anything else."""
-    return {"access_code_required": bool(ACCESS_CODE), "google_login": web_oauth.configured}
+    return {
+        "access_code_required": bool(ACCESS_CODE),
+        "google_login": web_oauth.configured,
+        "eleven": eleven.configured,  # the ElevenLabs test page works (ELEVENLABS_API_KEY is set)
+    }
 
 
 @app.post("/api/session")
@@ -265,6 +281,107 @@ async def create_session(
             closer.add_done_callback(_background_tasks.discard)
     logger.info("web.session.created session_id=%s keep_old=%s", session_id, body.keep_old)
     return {"sdp": result.transport.sdp, "session_id": session_id}
+
+
+# ── ElevenLabs test engine (web/eleven.html) ──────────────────────────────────
+
+
+def _need_eleven() -> None:
+    if not eleven.configured:
+        raise HTTPException(status_code=503, detail="eleven_not_configured")
+
+
+@app.get("/api/eleven/voices")
+async def eleven_voices(
+    x_client_id: str | None = Header(default=None),
+    x_access_code: str | None = Header(default=None),
+) -> dict:
+    _user(x_client_id, x_access_code)
+    _need_eleven()
+    try:
+        voices = await eleven.voices()
+    except httpx.HTTPError as exc:
+        logger.exception("eleven.voices_failed")
+        raise HTTPException(status_code=502, detail="eleven_voices_failed") from exc
+    default = ELEVENLABS_VOICE_ID or (voices[0]["id"] if voices else "")
+    return {"voices": voices, "default": default, "models": ELEVEN_MODELS, "default_model": ELEVENLABS_MODEL}
+
+
+@app.post("/api/eleven/tts")
+async def eleven_tts(
+    body: TtsRequest,
+    x_client_id: str | None = Header(default=None),
+    x_access_code: str | None = Header(default=None),
+) -> StreamingResponse:
+    """One or two sentences → MP3, streamed as ElevenLabs makes it."""
+    _user(x_client_id, x_access_code)
+    _need_eleven()
+    if not body.text.strip() or not body.voice_id:
+        raise HTTPException(status_code=400, detail="empty_text")
+    try:
+        audio = await eleven.tts(body)
+    except ElevenLabsError as exc:
+        logger.warning("eleven.tts_failed status=%s detail=%s", exc.status, exc.detail)
+        raise HTTPException(status_code=502, detail=f"eleven_{exc.status}: {exc.detail}") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="eleven_unreachable") from exc
+    return StreamingResponse(audio, media_type="audio/mpeg")
+
+
+class ElevenSessionRequest(BaseModel):
+    sdp: str
+    feminine: bool = True  # the ElevenLabs voice's gender: Ukrainian past tense agrees with it
+
+
+@app.post("/api/eleven/session")
+async def eleven_session(
+    body: ElevenSessionRequest,
+    x_client_id: str | None = Header(default=None),
+    x_access_code: str | None = Header(default=None),
+) -> dict:
+    """Browser SDP offer → Realtime call that answers in text; tools run here over a sideband."""
+    user = _user(x_client_id, x_access_code)
+    _need_eleven()
+    language = LANGUAGE_OPTIONS.get(user.language, LANGUAGE_OPTIONS["uk"])
+    today = date.today().isoformat()
+    instructions = build_eleven_prompt(
+        language_name=language,
+        assistant_name=user.assistant_name,
+        today=today,
+        feminine=body.feminine,
+        tool_rules=build_tool_rules(today=today, language_name=language),
+    ) + _WEB_NOTE
+    try:
+        result = await openai_client.realtime.calls.create(
+            sdp=body.sdp, session=realtime_session(instructions=instructions, language=user.language)
+        )
+    except Exception as exc:
+        logger.exception("eleven.session.create_failed")
+        raise HTTPException(status_code=502, detail=f"realtime_create_failed: {type(exc).__name__}") from exc
+    # The call id is only in the Location header: /v1/realtime/calls/{call_id}
+    call_id = (result.response.headers.get("location") or "").rstrip("/").rsplit("/", 1)[-1]
+    if not call_id:
+        raise HTTPException(status_code=502, detail="realtime_no_call_id")
+    for old in list(user.bridges):  # one call per browser, as with Live
+        try:
+            await old.close()
+        except Exception:
+            logger.debug("closing old session failed", exc_info=True)
+    bridge = RealtimeToolBridge(
+        client=openai_client,
+        call_id=call_id,
+        executor=user.executor,
+        conversation=user.conversation,
+        history=history_items(user.conversation.live_input()),
+        on_closed=user.bridges.discard,
+        max_duration_s=MAX_SESSION_S,
+    )
+    user.bridges.add(bridge)
+    task = asyncio.create_task(bridge.run())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    logger.info("eleven.session.created call_id=%s", call_id)
+    return {"sdp": result.text, "session_id": call_id}
 
 
 @app.get("/api/me")

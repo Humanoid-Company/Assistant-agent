@@ -114,3 +114,9 @@ def build_backend_prompt(*, today: str, language_name: str) -> str:
         + f" Today is {today}. Interpret relative dates in timezone {GOOGLE_CALENDAR_TIMEZONE}."
         + f" Prefer tool messages in {language_name}."
     )
+
+
+def build_tool_rules(*, today: str, language_name: str) -> str:
+    """The backend's tool rules for a model that calls the tools itself and also talks (the
+    ElevenLabs test engine): everything but the «you never speak to the user» opening."""
+    return build_backend_prompt(today=today, language_name=language_name).split("\n\n", 1)[1]
