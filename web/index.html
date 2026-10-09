@@ -91,6 +91,23 @@
         </span>
         <input id="voiceNow" type="checkbox" class="switch" role="switch" checked>
       </label>
+      <div class="pron">
+        <div class="pron-head">
+          <span class="setting-text">
+            <span class="setting-title">Тест вимови</span>
+            <span class="hint">Єва скаже фразу зі «с», «ш», «ц», «щ», датою й часом. Запис з'явиться нижче з підписом —
+              міняйте голос або промпт і порівнюйте. Слухайте записи, коли Єва на паузі.</span>
+          </span>
+          <button id="pronTest" class="btn" disabled>▶ Тест</button>
+        </div>
+        <label for="promptVariant">Промпт подачі</label>
+        <select id="promptVariant">
+          <option value="v1">v1 — основний</option>
+          <option value="v2">v2 — «розмова, не читання»</option>
+        </select>
+        <p id="promptInfo" class="hint"></p>
+        <div id="pronList" class="pron-list"></div>
+      </div>
     </section>
 
     <section class="card">

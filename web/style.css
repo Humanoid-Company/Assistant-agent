@@ -143,3 +143,12 @@ footer { margin-top: 20px; text-align: center; }
 .slider-hint { margin: 0 0 10px; }
 .sample-label { display: block; margin-top: 16px; }
 #sample { width: 100%; box-sizing: border-box; resize: vertical; font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--text); }
+
+/* Pronunciation test */
+.pron { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.pron-head { display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; margin-bottom: 12px; }
+.pron-head .btn { flex: 0 0 auto; }
+.pron select { width: 100%; }
+.pron-list { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.pron-item { display: flex; flex-direction: column; gap: 4px; font-size: 0.9rem; font-weight: 600; }
+.pron-item audio { width: 100%; height: 36px; }

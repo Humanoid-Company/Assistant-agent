@@ -33,8 +33,9 @@
   if (!(volume >= 0 && volume <= 1)) volume = 1;
 
   const DEBUG = params.get("debug") === "1";
-  // ?prompt=v2: try the experimental delivery prompt (prompts/live_prompt.py) instead of the usual one.
-  const PROMPT_VARIANT = params.get("prompt") || undefined;
+  // Delivery prompt (prompts/live_prompt.py): v1 is the usual one, v2 the experiment. Picked in the
+  // voice card (or ?prompt=v2); a change reopens the call, as a voice change does.
+  let promptVariant = params.get("prompt") || store.get("va-prompt") || "v1";
   let pc = null;
   let channel = null;
   let sessionVoice = ""; // the voice the current call was opened with
@@ -337,6 +338,7 @@
     $("talk").disabled = false;
     $("resume").hidden = eva.mode !== "waiting";
     $("pause").hidden = eva.mode !== "active";
+    $("pronTest").disabled = eva.mode !== "active" || !!pron;
     $("wakeHint").textContent = eva.wakeSupported
       ? "Покличте Єву — «Єва, скажи», «Привіт, Єва», «Гей, Єва», «Єво, слухай». «Дякую, Єва» — пауза. Браузер попросить доступ до мікрофона."
       : "Цей браузер не вміє слухати «Єва, скажи» (потрібен Chrome, Edge або Safari) — користуйтеся кнопками «Пауза» / «Продовжити». «Дякую, Єва» працює.";
@@ -623,7 +625,7 @@
       const res = await fetch(BACKEND + "/api/session", {
         method: "POST",
         headers: headers(),
-        body: JSON.stringify({ sdp: withClearOpus(offer.sdp), voice: voice || undefined, speed, style, prompt: PROMPT_VARIANT, user_text: opts.userText || undefined }),
+        body: JSON.stringify({ sdp: withClearOpus(offer.sdp), voice: voice || undefined, speed, style, prompt: promptVariant, user_text: opts.userText || undefined }),
       });
       if (my !== attempt) return;
       if (res.status === 401) {
@@ -1106,7 +1108,7 @@
         method: "POST",
         headers: headers(),
         // keep_old: the current call goes on until the page swaps (the server would end it).
-        body: JSON.stringify({ sdp: withClearOpus(offer.sdp), voice: s.voice, speed, style, prompt: PROMPT_VARIANT, keep_old: true }),
+        body: JSON.stringify({ sdp: withClearOpus(offer.sdp), voice: s.voice, speed, style, prompt: promptVariant, keep_old: true }),
       });
       if (standby !== s) return;
       if (!res.ok) throw new Error("session " + res.status);
@@ -1410,6 +1412,67 @@
 
   function showGate() { $("gate").hidden = false; $("code").focus(); }
 
+  // ── Pronunciation test: a fixed phrase in the current voice, recorded for side-by-side listening ──
+  const PRON_PHRASE = "Саша йшла шосе й сушила сушку. Шість шишок, сорок сорок і цукерки для щасливих. " +
+    "Зустріч у четвер, двадцять п'ятого жовтня, о пів на третю — не забудь!";
+  let pron = null;
+
+  function pronTest() {
+    if (eva.mode !== "active" || pron || !$("remote").srcObject) return;
+    let recorder;
+    try { recorder = new MediaRecorder($("remote").srcObject); } catch { addLine("system", "Цей браузер не вміє записувати звук."); return; }
+    const label = voiceLabel(sessionVoice || voice) + " · промпт " + promptVariant;
+    const chunks = [];
+    pron = { recorder, heard: false, started: Date.now() };
+    recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+    recorder.onstop = () => {
+      const kept = pron && pron.heard;
+      pron = null;
+      updateButtons();
+      if (!kept || !chunks.length) { addLine("system", "Тест вимови: Єва нічого не сказала — спробуйте ще раз."); return; }
+      const item = document.createElement("div");
+      item.className = "pron-item";
+      const name = document.createElement("span");
+      name.textContent = label;
+      const player = document.createElement("audio");
+      player.controls = true;
+      player.src = URL.createObjectURL(new Blob(chunks, { type: recorder.mimeType }));
+      item.append(name, player);
+      $("pronList").prepend(item);
+    };
+    recorder.start();
+    updateButtons();
+    commentary("Pronunciation test from the page (not the user speaking): say exactly this text once, word for word, " +
+      "in your normal voice and manner — nothing before or after it, no comment: «" + PRON_PHRASE + "»");
+    // Stop once she has spoken and gone quiet (a pause between sentences is shorter), or after 25 s.
+    const watch = setInterval(() => {
+      if (!pron || pron.recorder !== recorder) { clearInterval(watch); return; }
+      if (barge.audible) pron.heard = true;
+      if (!gate && Date.now() - pron.started > 12000) pron.heard = true; // ?gate=off: no level to watch, take 12 s
+      const quiet = !barge.audible && Date.now() - eva.lastAudibleAt > 1500;
+      if ((pron.heard && (quiet || !gate)) || Date.now() - pron.started > 25000 || eva.mode !== "active") {
+        clearInterval(watch);
+        recorder.stop();
+      }
+    }, 200);
+  }
+
+  const PROMPT_INFO = {
+    v1: "Як гарно звучати: тепло, спокійно, плавно, з вдихами й «хм»; вимова розписана детально. " +
+      "Може тягнути в манеру диктора.",
+    v2: "Як живо говорити: наче телефонна розмова з другом — інтонація за змістом, нерівний темп, " +
+      "короткі розмовні речення, людські звуки рідше.",
+  };
+  const showPromptInfo = () => { $("promptInfo").textContent = PROMPT_INFO[$("promptVariant").value] || ""; };
+
+  function changePrompt() {
+    showPromptInfo();
+    promptVariant = $("promptVariant").value;
+    store.set("va-prompt", promptVariant);
+    if (eva.mode === "active") switchVoiceFast(false, true); // a new call with the same voice and memory
+    else if (eva.mode === "waiting") restartSession("switching", {});
+  }
+
   async function init() {
     $("talk").addEventListener("click", () => (eva.mode === "off" ? start(defaultStart()) : stop()));
     $("pause").addEventListener("click", pauseEva);
@@ -1417,6 +1480,10 @@
     $("bgListen").addEventListener("change", toggleBgListen);
     showBgListen();
     $("voiceNow").addEventListener("change", toggleVoiceNow);
+    $("pronTest").addEventListener("click", pronTest);
+    $("promptVariant").value = promptVariant === "v2" ? "v2" : "v1";
+    $("promptVariant").addEventListener("change", changePrompt);
+    showPromptInfo();
     showVoiceNow();
     $("newChat").addEventListener("click", newConversation);
     $("voice").addEventListener("change", () => { stopPreview(); showVoice(true); });
