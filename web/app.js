@@ -374,11 +374,132 @@
   }
 
   // level: barge-in ducking (1 / 0.5 / 0) × the user's volume; silent while Єва is paused.
+  let remoteLevel = 1;
   function setRemoteVolume(level) {
+    remoteLevel = level;
     const el = $("remote");
     const v = eva.mode === "waiting" ? 0 : level * volume;
+    if (fx && fx.on) {
+      // She is heard through the «Чистіший звук» chain; the element only keeps the stream flowing.
+      el.muted = true;
+      fx.setVolume(v);
+      return;
+    }
     el.volume = v;
     el.muted = v === 0;
+  }
+
+  // Her voice into the speakers (straight, or through the chain) and into the gate's echo meter.
+  function playRemote(stream) {
+    $("remote").srcObject = stream;
+    if (gate) gate.listenTo(stream);
+    if (cleanVoice) {
+      ensureFx().then((f) => { if (f && $("remote").srcObject === stream) { f.attach(stream); setRemoteVolume(remoteLevel); } });
+    }
+  }
+
+  // ── «Чистіший звук»: a small chain on her voice before the speakers ────────────────────────────
+  // Rumble cut, a little presence (clearer words), a de-esser that only tames sharp «с»/«ш»/«ц»,
+  // and a gentle compressor so quiet sentence ends don't drop. It can't change how the model says a
+  // sound — only how it comes out. Off by default (?clean=1 or the switch turns it on).
+  let cleanVoice = params.get("clean") === "1" || store.get("va-clean") === "1";
+  let fx = null;
+  let fxLoading = null;
+  const DEESS_WORKLET = `
+    class DeEsser extends AudioWorkletProcessor {
+      constructor() {
+        super();
+        this.a = 1 - Math.exp((-2 * Math.PI * 5000) / sampleRate); // split at 5 kHz
+        this.atk = 1 - Math.exp(-1 / (sampleRate * 0.002));
+        this.rel = 1 - Math.exp(-1 / (sampleRate * 0.06));
+        this.lp = 0; this.env = 0; this.g = 1;
+        this.thr = 0.035; // sibilance above this (linear) is pulled down
+      }
+      process(inputs, outputs) {
+        const input = inputs[0][0];
+        const output = outputs[0][0];
+        if (!input || !output) return true;
+        for (let i = 0; i < input.length; i++) {
+          const x = input[i];
+          this.lp += this.a * (x - this.lp);
+          const high = x - this.lp;
+          const level = Math.abs(high);
+          this.env += (level - this.env) * (level > this.env ? this.atk : this.rel);
+          // Ratio ~3:1 above the threshold, at most −9 dB, smoothed so it never clicks.
+          const want = this.env > this.thr ? Math.max(0.35, Math.pow(this.thr / this.env, 0.66)) : 1;
+          this.g += (want - this.g) * (want < this.g ? this.atk : this.rel);
+          output[i] = this.lp + high * this.g;
+        }
+        for (let c = 1; c < outputs[0].length; c++) outputs[0][c].set(output);
+        return true;
+      }
+    }
+    registerProcessor("de-esser", DeEsser);
+  `;
+
+  function ensureFx() {
+    if (fx) return Promise.resolve(fx);
+    if (!fxLoading) fxLoading = createFx().then((f) => { fx = f; fxLoading = null; return f; });
+    return fxLoading;
+  }
+
+  async function createFx() {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return null;
+    const ctx = new AudioCtx();
+    try {
+      if (!ctx.audioWorklet) throw new Error("no AudioWorklet");
+      const url = URL.createObjectURL(new Blob([DEESS_WORKLET], { type: "application/javascript" }));
+      try { await ctx.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
+      await ctx.resume().catch(() => {});
+      const highpass = new BiquadFilterNode(ctx, { type: "highpass", frequency: 70, Q: 0.7 });
+      const presence = new BiquadFilterNode(ctx, { type: "peaking", frequency: 3200, Q: 1, gain: 2.5 });
+      const deEsser = new AudioWorkletNode(ctx, "de-esser", { channelCount: 1, channelCountMode: "explicit" });
+      const comp = new DynamicsCompressorNode(ctx, { threshold: -22, knee: 12, ratio: 2.5, attack: 0.004, release: 0.18 });
+      // The compressor already adds its own make-up gain; no more on top — louder would just
+      // sound "better" in a side-by-side comparison.
+      const makeup = new GainNode(ctx, { gain: 1 });
+      const volumeNode = new GainNode(ctx, { gain: 1 });
+      const record = ctx.createMediaStreamDestination(); // what the pronunciation test records
+      highpass.connect(presence).connect(deEsser).connect(comp).connect(makeup).connect(volumeNode);
+      volumeNode.connect(ctx.destination);
+      makeup.connect(record);
+      let source = null;
+      return {
+        on: false,
+        recordStream: record.stream,
+        attach(stream) {
+          if (source) source.disconnect();
+          source = ctx.createMediaStreamSource(stream);
+          source.connect(highpass);
+          ctx.resume().catch(() => {});
+          this.on = true;
+        },
+        detach() {
+          if (source) source.disconnect();
+          source = null;
+          this.on = false;
+        },
+        setVolume(v) { volumeNode.gain.setTargetAtTime(v, ctx.currentTime, 0.02); },
+      };
+    } catch {
+      ctx.close().catch(() => {});
+      return null;
+    }
+  }
+
+  async function toggleCleanVoice() {
+    cleanVoice = $("cleanVoice").checked;
+    store.set("va-clean", cleanVoice ? "1" : "0");
+    const stream = $("remote").srcObject;
+    if (cleanVoice) {
+      const f = await ensureFx();
+      if (!f) { addLine("system", "Цей браузер не підтримує обробку звуку."); $("cleanVoice").checked = cleanVoice = false; return; }
+      if (stream) f.attach(stream);
+    } else if (fx) {
+      fx.detach();
+    }
+    setRemoteVolume(remoteLevel);
   }
   const bargeLevel = () => (barge.stage === "muted" ? 0 : barge.stage === "ducked" ? 0.5 : 1);
 
@@ -605,10 +726,7 @@
       mic = stream;
       const peer = new RTCPeerConnection();
       pc = peer;
-      peer.ontrack = (e) => {
-        $("remote").srcObject = e.streams[0];
-        if (gate) gate.listenTo(e.streams[0]);
-      };
+      peer.ontrack = (e) => playRemote(e.streams[0]);
       // A voice switch keeps the gate too (it is built on the same mic): no new AudioContext.
       if (gate && (gate.stream !== mic || !gate.alive())) { gate.close(); gate = null; }
       if (!gate) {
@@ -1152,11 +1270,8 @@
     channel = s.channel;
     sessionVoice = s.voice;
     wireCall(s.peer, s.channel);
-    if (s.stream) {
-      $("remote").srcObject = s.stream;
-      if (gate) gate.listenTo(s.stream);
-    }
-    s.peer.ontrack = (e) => { $("remote").srcObject = e.streams[0]; if (gate) gate.listenTo(e.streams[0]); };
+    if (s.stream) playRemote(s.stream);
+    s.peer.ontrack = (e) => playRemote(e.streams[0]);
     try {
       await s.sender.replaceTrack(gate ? gate.track : mic.getAudioTracks()[0]);
     } catch { /* closed meanwhile: its close handler takes over */ }
@@ -1422,8 +1537,9 @@
   function pronTest() {
     if (eva.mode !== "active" || pron || !$("remote").srcObject) return;
     let recorder;
-    try { recorder = new MediaRecorder($("remote").srcObject); } catch { addLine("system", "Цей браузер не вміє записувати звук."); return; }
-    const label = voiceLabel(sessionVoice || voice) + " · промпт " + promptVariant;
+    const processed = !!(fx && fx.on);
+    try { recorder = new MediaRecorder(processed ? fx.recordStream : $("remote").srcObject); } catch { addLine("system", "Цей браузер не вміє записувати звук."); return; }
+    const label = voiceLabel(sessionVoice || voice) + " · промпт " + promptVariant + (processed ? " · чистіший звук" : "");
     const chunks = [];
     pron = { recorder, heard: false, started: Date.now() };
     recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
@@ -1483,6 +1599,8 @@
     showBgListen();
     $("voiceNow").addEventListener("change", toggleVoiceNow);
     $("pronTest").addEventListener("click", pronTest);
+    $("cleanVoice").checked = cleanVoice;
+    $("cleanVoice").addEventListener("change", toggleCleanVoice);
     $("promptVariant").value = promptVariant === "v1" ? "v1" : "v2";
     $("promptVariant").addEventListener("change", changePrompt);
     showPromptInfo();
