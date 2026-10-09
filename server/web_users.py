@@ -34,7 +34,6 @@ from voice.background import BackgroundLog, make_openai_summarizer
 from voice.conversation import ConversationLog
 from voice.options import (
     LANGUAGE_OPTIONS,
-    LANGUAGE_REFUSAL,
     SPEED_OPTIONS,
     STYLE_OPTIONS,
     VOICE_PERSONAS,
@@ -185,7 +184,7 @@ def _build_executor(user: WebUser) -> ToolExecutor:
     def change_language(args: dict, ctx: ToolExecutionContext) -> ToolResult:
         language = str(args.get("language") or "").strip().lower()
         if language not in LANGUAGE_OPTIONS:
-            return ToolResult(ok=False, status="needs_more_info", message=LANGUAGE_REFUSAL)
+            return ToolResult(ok=False, status="needs_more_info", message="Доступні мови: uk, ru, en.")
         user.language = language
         return ToolResult(ok=True, status="ok", message=f"Далі говорю {LANGUAGE_OPTIONS[language]}.")
 

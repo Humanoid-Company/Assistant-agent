@@ -21,7 +21,6 @@ from voice.live_session import LiveVoiceSession
 from voice.mic import LiveMicCapture
 from voice.options import (
     LANGUAGE_OPTIONS,
-    LANGUAGE_REFUSAL,
     LIVE_VOICE_OPTIONS,
     SPEED_OPTIONS,
     STYLE_OPTIONS,
@@ -223,7 +222,7 @@ class LiveDriverMixin:
             return ToolResult(
                 ok=False,
                 status="error",
-                message=LANGUAGE_REFUSAL,
+                message=f"Мова {language!r} не підтримується — скажи користувачу спробувати ще раз.",
             )
         self._memory["language"] = language
         self._save_memory()

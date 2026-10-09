@@ -262,13 +262,11 @@ def delivery_instruction(speed: str = "normal", style: str = "normal", *, change
 # Unlike voice, the spoken language is just plain-text instructions + an STT
 # transcription hint — both apply live via a session.update, no reconnect
 # needed (see RealtimeConversation.update_transcription_language()).
-# No Russian, ever — not even when asked (a team decision). A stored "ru" falls back to Ukrainian.
 LANGUAGE_OPTIONS: dict[str, str] = {
     "uk": "українською",
+    "ru": "російською",
     "en": "англійською",
 }
-# What the agent is told when asked for a language it does not speak (Russian included).
-LANGUAGE_REFUSAL = "Я говорю лише українською або англійською — російською ніколи. Скажи це користувачу українською."
 
 # Words that are never a plausible name — pronouns/fillers/verbs a misheard or
 # noisy transcript (or a too-trusting model tool-call argument) sometimes
