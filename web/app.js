@@ -621,7 +621,7 @@
       const res = await fetch(BACKEND + "/api/session", {
         method: "POST",
         headers: headers(),
-        body: JSON.stringify({ sdp: offer.sdp, voice: voice || undefined, speed, style, prompt: PROMPT_VARIANT, user_text: opts.userText || undefined }),
+        body: JSON.stringify({ sdp: withClearOpus(offer.sdp), voice: voice || undefined, speed, style, prompt: PROMPT_VARIANT, user_text: opts.userText || undefined }),
       });
       if (my !== attempt) return;
       if (res.status === 401) {
@@ -638,6 +638,19 @@
       addLine("system", msg);
       stop("Не вдалося підключитись", "err");
     }
+  }
+
+  // The offer's Opus line says how we want to receive her voice. Browser defaults leave the bitrate
+  // to the sender, and a low one smears «с», «ш», «ц» (they live at 4–12 kHz) — she sounded lisped.
+  // Only the copy sent to the server is changed; the local description stays as the browser made it.
+  function withClearOpus(sdp) {
+    const pt = (sdp.match(/a=rtpmap:(\d+) opus\/48000/i) || [])[1];
+    if (!pt) return sdp;
+    const want = { maxplaybackrate: "48000", maxaveragebitrate: "64000", useinbandfec: "1", stereo: "0" };
+    return sdp.replace(new RegExp("a=fmtp:" + pt + " ([^\\r\\n]*)"), (line, params) => {
+      const kept = params.split(";").filter((p) => p && !(p.split("=")[0].trim() in want));
+      return "a=fmtp:" + pt + " " + kept.concat(Object.entries(want).map(([k, v]) => k + "=" + v)).join(";");
+    });
   }
 
   // The current call's connection and server events (a standby call gets them when swapped in).
@@ -1091,7 +1104,7 @@
         method: "POST",
         headers: headers(),
         // keep_old: the current call goes on until the page swaps (the server would end it).
-        body: JSON.stringify({ sdp: offer.sdp, voice: s.voice, speed, style, prompt: PROMPT_VARIANT, keep_old: true }),
+        body: JSON.stringify({ sdp: withClearOpus(offer.sdp), voice: s.voice, speed, style, prompt: PROMPT_VARIANT, keep_old: true }),
       });
       if (standby !== s) return;
       if (!res.ok) throw new Error("session " + res.status);
@@ -1212,6 +1225,31 @@
       mode: eva.mode, pendingDelivery, audible: barge.audible, speaking: barge.speaking,
       thinking: eva.thinking, quietMs: Date.now() - eva.lastAudibleAt, channel: channel && channel.readyState,
     });
+    // await evaAudio(): what her voice actually arrives as — codec line, kbit/s over 3 s, lost and
+    // concealed audio. A low bitrate or a lot of concealment = the lisp is the transport, not the model.
+    window.evaAudio = async () => {
+      if (!pc) return null;
+      const read = async () => {
+        let inbound = null, codecs = {};
+        (await pc.getStats()).forEach((r) => {
+          if (r.type === "inbound-rtp" && r.kind === "audio") inbound = r;
+          if (r.type === "codec") codecs[r.id] = r;
+        });
+        return { inbound, codec: inbound && codecs[inbound.codecId] };
+      };
+      const a = await read();
+      await new Promise((r) => setTimeout(r, 3000));
+      const b = await read();
+      if (!a.inbound || !b.inbound) return null;
+      const s = b.inbound;
+      return {
+        codec: b.codec && b.codec.mimeType + " " + b.codec.clockRate + " " + (b.codec.sdpFmtpLine || ""),
+        kbps: Math.round(((s.bytesReceived - a.inbound.bytesReceived) * 8) / 3000),
+        packetsLost: s.packetsLost,
+        concealedPct: s.totalSamplesReceived ? +((100 * s.concealedSamples) / s.totalSamplesReceived).toFixed(1) : 0,
+        jitterMs: Math.round((s.jitter || 0) * 1000),
+      };
+    };
   }
 
   function sendDeliveryWhenQuiet() {
