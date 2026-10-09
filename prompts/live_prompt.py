@@ -216,10 +216,17 @@ _LIVE_PROMPT_TAIL: str = (
     "google_account, do not call google_account again for the same permission. "
     "If notes status is ambiguous, briefly ask which note.\n"
     "\n"
-    "Google sign-in: connecting or switching an account opens ONE Google page in the browser "
-    "that asks for all permissions at once. While it is open (consent_pending), keep talking "
-    "normally and help the person through it; you will be told the outcome — do not claim "
-    "success before that. Typical questions and what to say:\n"
+    "Google sign-in: connecting or switching an account opens one Google page in the browser. "
+    "When it opens you get a note with help for it; you are told the outcome — never claim "
+    "success before that. Never ask for or accept a Google password by voice.\n"
+)
+
+# Only needed while the Google page is open: sent then (web: the login popup opens; desktop: the
+# consent page opens) instead of sitting in every call's prompt.
+GOOGLE_SIGNIN_HELP: str = (
+    "Note, not a message from the user — do not answer it or mention it: the Google sign-in page is "
+    "open now and asks for all permissions at once. Keep talking normally and help the person "
+    "through it if they ask; you will be told the outcome. Typical questions and what to say:\n"
     "- «Google не перевірив цей додаток» / «Google hasn't verified this app»: it is the "
     "developer's own app in testing — click «Додатково» (Advanced), then «Перейти до …» "
     "(Go to … unsafe).\n"
@@ -228,9 +235,9 @@ _LIVE_PROMPT_TAIL: str = (
     "- «Доступ заблоковано» / «Access blocked» / not a test user: this Google account is not "
     "on the app's test-user list — the developer must add the email in Google Cloud Console.\n"
     "- Wrong account chosen: finish or close it, then say «зміни акаунт».\n"
-    "- Closed the tab or nothing opened: say «підключи Google» again; a stuck attempt expires "
-    "by itself in about ten minutes.\n"
-    "- Never ask for or accept a Google password by voice.\n"
+    "- Closed the tab or nothing opened: say «підключи Google» again (on the web page: press "
+    "«Підключити Google»); a stuck attempt expires by itself in about ten minutes.\n"
+    "- Never ask for or accept a Google password by voice."
 )
 
 # Experiment (?prompt=v2 on the page): v1's «calm, unhurried, legato, medium-low, settle downward»

@@ -45,7 +45,7 @@ from config import (
     OPENAI_LIVE_VOICE,
 )
 from prompts.backend_prompt import build_backend_prompt, build_tool_rules
-from prompts.live_prompt import PROMPT_VARIANTS, build_eleven_prompt, build_live_prompt
+from prompts.live_prompt import GOOGLE_SIGNIN_HELP, PROMPT_VARIANTS, build_eleven_prompt, build_live_prompt
 from server.eleven import (
     ELEVEN_MODELS,
     ElevenLabs,
@@ -539,11 +539,16 @@ def google_disconnect(
 
 
 @app.get("/auth/google/start")
-def google_start(client_id: str = Query(...), access_code: str | None = Query(default=None)):
+async def google_start(client_id: str = Query(...), access_code: str | None = Query(default=None)):
     """Opened by the page in a popup: redirect to Google's consent screen."""
-    _user(client_id, access_code)
+    user = _user(client_id, access_code)
     if not web_oauth.configured:
         return _page("Вхід у Google не налаштовано на сервері (GOOGLE_OAUTH_WEB_CLIENT_ID/SECRET).", ok=False)
+    # The popup is open: the call gets the help for Google's screens (kept out of the prompt).
+    for bridge in list(user.bridges):
+        task = asyncio.create_task(bridge.append_instruction(GOOGLE_SIGNIN_HELP))
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
     return RedirectResponse(web_oauth.authorization_url(client_id))
 
 

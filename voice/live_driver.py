@@ -10,7 +10,7 @@ from config import (
     OPENAI_LIVE_VOICE,
 )
 from prompts.backend_prompt import build_backend_prompt
-from prompts.live_prompt import build_live_prompt
+from prompts.live_prompt import GOOGLE_SIGNIN_HELP, build_live_prompt
 from tools.executor import ToolExecutionContext
 from tools.results import ToolResult, agent_result_to_tool_result
 from tools.router_bridge import _run_connectivity_checks
@@ -249,7 +249,11 @@ class LiveDriverMixin:
 
     def _live_google_account(self, args: dict, context: ToolExecutionContext) -> ToolResult:
         del context
-        return agent_result_to_tool_result(self._google_account(args))
+        result = self._google_account(args)
+        # The consent page is open now: give the model its help (kept out of the prompt).
+        if (result.data or {}).get("consent_pending") and self._live is not None:
+            self._live.append_instruction(GOOGLE_SIGNIN_HELP)
+        return agent_result_to_tool_result(result)
 
     def _live_web_search(self, args: dict, context: ToolExecutionContext) -> ToolResult:
         return self._web_search_tool_result(

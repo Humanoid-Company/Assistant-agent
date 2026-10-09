@@ -555,3 +555,26 @@ def test_prompt_v2_is_the_default_and_v1_only_when_the_page_asks(monkeypatch):
         assert "Voice changes:" in text and "Interruption policy" in text
         assert "You are a voice assistant first" in text and "зараз прикину" in text
     web.users.get(headers["X-Client-Id"]).bridges.clear()
+
+
+def test_google_signin_help_is_sent_when_the_popup_opens(monkeypatch):
+    """The help for Google's screens is not in every call's prompt: the call gets it when the login opens."""
+    from prompts.live_prompt import GOOGLE_SIGNIN_HELP, build_live_prompt
+
+    assert "Access blocked" not in build_live_prompt(language_name="українською", assistant_name=None, today="2026-10-09")
+    monkeypatch.setattr(web, "ACCESS_CODE", "")
+    monkeypatch.setattr(
+        web, "web_oauth", SimpleNamespace(configured=True, authorization_url=lambda cid: "https://accounts.google.com/x")
+    )
+    sent: list[str] = []
+
+    class Bridge:
+        async def append_instruction(self, text):
+            sent.append(text)
+
+    client_id = "signin-help-0123456789ab"
+    web.users.get(client_id).bridges.add(Bridge())
+    res = TestClient(web.app).get(f"/auth/google/start?client_id={client_id}", follow_redirects=False)
+    assert res.status_code in (302, 307)
+    assert sent == [GOOGLE_SIGNIN_HELP]
+    web.users.get(client_id).bridges.clear()
