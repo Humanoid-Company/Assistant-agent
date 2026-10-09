@@ -134,3 +134,12 @@ h2 label { display: inline; margin: 0; font-weight: inherit; }
 .msg.system { color: var(--muted); font-size: 0.85rem; align-self: center; background: none; }
 .empty { margin: 0; }
 footer { margin-top: 20px; text-align: center; }
+
+/* GPT-Live | ElevenLabs test page */
+.engine { display: flex; gap: 4px; padding: 4px; margin-bottom: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
+.engine a { flex: 1 1 0; text-align: center; padding: 8px 10px; border-radius: 8px; color: var(--muted); text-decoration: none; font-weight: 600; font-size: 0.9rem; }
+.engine a[aria-current="page"] { background: var(--accent); color: var(--accent-text); }
+.engine a:not([aria-current]):hover { color: var(--text); }
+.slider-hint { margin: 0 0 10px; }
+.sample-label { display: block; margin-top: 16px; }
+#sample { width: 100%; box-sizing: border-box; resize: vertical; font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--text); }

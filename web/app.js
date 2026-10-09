@@ -5,6 +5,8 @@
   const params = new URLSearchParams(location.search);
   const BACKEND = (params.get("backend") || (window.APP_CONFIG || {}).BACKEND_URL || "").replace(/\/$/, "");
   const $ = (id) => document.getElementById(id);
+  // The engine switch (GPT-Live | ElevenLabs test page) keeps ?backend=… and the like.
+  document.querySelectorAll("[data-keep-query]").forEach((a) => { a.href = a.getAttribute("href") + location.search; });
 
   const store = {
     get(key) { try { return localStorage.getItem(key); } catch { return null; } },

@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Єва — ElevenLabs</title>
+  <meta name="description" content="Тест голосу ElevenLabs поруч із GPT-Live: Realtime слухає й відповідає текстом, ElevenLabs озвучує.">
+  <link rel="stylesheet" href="style.css">
+  <script src="config.js"></script>
+  <script src="eleven.js" defer></script>
+</head>
+<body>
+  <main class="wrap">
+    <nav class="engine" aria-label="Голосовий двигун">
+      <a href="./" data-keep-query>GPT-Live</a>
+      <a href="eleven" data-keep-query aria-current="page">ElevenLabs · тест</a>
+    </nav>
+    <header>
+      <h1>Єва · ElevenLabs</h1>
+      <p class="sub">Тестовий режим: OpenAI Realtime слухає й відповідає текстом, ElevenLabs озвучує.
+        Календар, пошта й нотатки працюють так само. Найкраще — у навушниках.</p>
+    </header>
+
+    <section id="gate" class="card" hidden>
+      <label for="code">Код доступу</label>
+      <div class="row">
+        <input id="code" type="password" autocomplete="off" placeholder="Отримайте в команди">
+        <button id="saveCode" class="btn">Зберегти</button>
+      </div>
+    </section>
+
+    <section id="off" class="card" hidden>
+      <p>ElevenLabs не налаштовано на сервері: додайте <code>ELEVENLABS_API_KEY</code> у змінні середовища Render.</p>
+    </section>
+
+    <section class="card call">
+      <div class="status-line">
+        <span id="dot" class="dot" aria-hidden="true"></span>
+        <span id="status">Не підключено</span>
+      </div>
+      <button id="talk" class="btn primary big" disabled>Почати розмову</button>
+      <p id="latency" class="hint">Затримка з'явиться після першої відповіді.</p>
+    </section>
+
+    <section class="card">
+      <h2><label for="voice">Голос</label></h2>
+      <div class="row voice-pick">
+        <select id="voice" disabled><option>Завантаження…</option></select>
+        <button id="preview" class="btn" disabled>▶ Прослухати</button>
+      </div>
+      <p id="voiceInfo" class="hint"></p>
+      <div class="settings">
+        <div>
+          <label for="model">Модель</label>
+          <select id="model"></select>
+        </div>
+      </div>
+      <div id="sliders"></div>
+      <label class="setting" for="boost">
+        <span class="setting-text">
+          <span class="setting-title">Speaker boost</span>
+          <span class="hint">Ближче до оригінального голосу, трохи повільніше.</span>
+        </span>
+        <input id="boost" type="checkbox" class="switch" role="switch" checked>
+      </label>
+      <label for="sample" class="sample-label">Фраза для «Прослухати»</label>
+      <textarea id="sample" rows="3"></textarea>
+      <p class="hint">Налаштування діють з наступного речення, навіть посеред розмови. Рід («зрозуміла/зрозумів») —
+        з наступної розмови. Кожне «Прослухати» й кожна відповідь витрачають кредити ElevenLabs (≈ символ за кредит).</p>
+    </section>
+
+    <section class="card">
+      <div class="google-head">
+        <h2>Розмова</h2>
+        <button id="newChat" class="btn ghost small-btn">Нова розмова</button>
+      </div>
+      <div id="log" class="log" aria-live="polite">
+        <p class="muted empty">Тут з'являтиметься текст розмови.</p>
+      </div>
+    </section>
+
+    <footer class="muted small">Google підключається на основній сторінці (GPT-Live) — акаунт спільний.</footer>
+  </main>
+  <audio id="player"></audio>
+</body>
+</html>
