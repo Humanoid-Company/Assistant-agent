@@ -43,6 +43,7 @@
   let elevenOn = false; // the server has an ElevenLabs key (/api/config)
   let sessionEngine = "live"; // what the current call was opened with
   let sessionTts = "openai";
+  let sessionVoiceFeminine = true; // the call's grammatical gender (ElevenLabs voices change in place)
   // Each engine keeps its own voice choice (their voice lists differ).
   const voiceKey = () => (engine === "live" ? "va-voice" : tts === "eleven" ? "el-voice" : "va-rt-voice");
   const elevenCall = () => sessionEngine === "realtime" && sessionTts === "eleven";
@@ -697,6 +698,7 @@
   }
 
   function onGateSignal(signal) {
+    if ("speaking" in signal) rtNearAt = Date.now(); // Realtime: was the person at the mic talking?
     bargeOnGate(signal);
     if ("audible" in signal) eva.lastAudibleAt = Date.now(); // when she started / stopped sounding
     if (barge.audible) eva.thinking = false;
@@ -717,6 +719,13 @@
       barge.timers.push(setTimeout(() => {
         if (barge.speaking && barge.stage === "idle") { barge.stage = "ducked"; setRemoteVolume(0.5); }
       }, 400));
+      // Realtime's words arrive only once the user stops, so a voice that keeps going over her
+      // (longer than a cough or an «угу») is taken as an interruption by itself.
+      if (sessionEngine === "realtime") {
+        barge.timers.push(setTimeout(() => {
+          if (barge.speaking && barge.stage === "ducked") bargeConfirm("stop");
+        }, 1200));
+      }
     } else {
       barge.speechEndedAt = Date.now();
       if (barge.stage === "muted") { scheduleRelease(); return; }
@@ -868,31 +877,153 @@
     if (pc) pc.getSenders().forEach((sender) => { if (sender.track) sender.track.enabled = on; });
   }
 
-  const rtTranscribed = new Set(); // user items whose transcript already came as deltas
+  // Realtime treats any sound as a turn and would answer a cough, a quiet «угу» or the TV (Live
+  // tells those apart itself). So it never answers by itself (server/realtime_engine.py); for each
+  // turn the page judges, from the same cues Live has:
+  //  - the words: a cough / «фу» is noise; «угу», «ага», «так» alone is listening (unless she just
+  //    asked something);
+  //  - the distance: the gate's near-voice detector says whether the person at the mic spoke;
+  //  - for a far voice without her name: the model itself, asked out of band «addressed to you?»
+  //    (it heard the audio) — background talk and the TV get no answer.
+  // A turn's bubble is placed when it ends (its words come later, after an answer may have started),
+  // so the log keeps the order; a skipped turn stays greyed out.
+  const NOISE_WORDS = new Set(["фу", "кхм", "кх", "кхе", "апчхи", "тьфу", "пф", "пфф", "хм", "мм", "ммм", "м", "е", "ее", "еее",
+    "ах", "ех", "ух", "кашель", "кашляє"]);
+  const ADDRESSED_CHECK = "Do not reply to the user. Decide only: is the user's last audio turn addressed to you, the " +
+    "assistant, and does it expect your reply or action (a question or request to you, an answer to what you asked, " +
+    "talk with you)? Answer «no» for background talk between other people, TV or radio, someone on the phone, a cough or " +
+    "other noise, a listener's «угу». Output exactly one word: yes or no.";
+  const rtTurns = new Map(); // item_id → { el, timer, near }
+  const rtChecks = new Map(); // response id of an «addressed?» check → { item, text }
+  const rtCheckWait = new Map(); // item_id → { timer, el } while its check runs
+  let rtSpeechAt = 0; // when Realtime heard the current turn start
+  let rtNearAt = 0; // when the gate last reported the near voice starting or stopping
+
+  function rtTurnEnded(itemId) {
+    openMsg.assistant = null; // her next answer goes below this turn, not into her last bubble
+    const el = addLine("user pending", "…");
+    // No words within a few seconds (the transcription failed): answer — the model heard the audio.
+    const timer = setTimeout(() => rtHeard(itemId, null), 3000);
+    const near = !gate || barge.speaking || rtNearAt >= rtSpeechAt - 1500;
+    rtTurns.set(itemId, { el, timer, near });
+  }
+
+  // text: the turn's words; "" = nothing intelligible; null = unknown (transcription failed).
+  function rtHeard(itemId, text) {
+    const turn = rtTurns.get(itemId);
+    rtTurns.delete(itemId);
+    if (turn) clearTimeout(turn.timer);
+    const verdict = text === null ? "answer" : rtJudge(text, !turn || turn.near);
+    if (turn) {
+      if (!text) {
+        turn.el.remove();
+      } else if (verdict === "skip") {
+        rtSkipped(turn.el, text);
+      } else {
+        turn.el.textContent = "";
+        turn.el.className = "msg user";
+        openMsg.user = turn.el; // the words go into this bubble
+        lastDeltaAt.user = Date.now();
+      }
+    }
+    // After the words have gone through the page (barge-in, «Дякую, Єва»): answer if still on.
+    if (verdict === "answer") setTimeout(rtRespond, 0);
+    else if (verdict === "ask") rtAsk(itemId, turn && turn.el);
+    return text && verdict !== "skip" ? { type: "session.input_transcript.delta", delta: text } : null;
+  }
+
+  function rtSkipped(el, text) {
+    if (!el) return;
+    if (text) el.textContent = text;
+    el.className = "msg user skipped";
+    el.title = "Не до Єви — без відповіді";
+  }
+
+  // "answer" | "skip" | "ask" (the model decides).
+  function rtJudge(text, near) {
+    const words = splitWords(text).flatMap((w) => w.split("-")).filter(Boolean); // «кхм-кхм», «ага-ага»
+    if (!words.length || words.every((w) => NOISE_WORDS.has(w))) return "skip";
+    if (words.length <= 3 && words.every((w) => BACKCHANNEL.has(w) || NOISE_WORDS.has(w))) return lastAnswerAsked() ? "answer" : "skip";
+    if (near || evaTokens(text).some((w) => EVA_NAME_FORMS.has(w))) return "answer";
+    return "ask";
+  }
+
+  function lastAnswerAsked() {
+    const bubbles = $("log").querySelectorAll(".msg.assistant");
+    const last = bubbles.length ? bubbles[bubbles.length - 1].textContent.trim() : "";
+    return /\?[»")]*$/.test(last);
+  }
+
+  // Out of band (not in the conversation, text only): the model says whether the turn was for her.
+  function rtAsk(itemId, el) {
+    const timer = setTimeout(() => { rtCheckWait.delete(itemId); rtRespond(); }, 2500); // no verdict in time: answer
+    rtCheckWait.set(itemId, { timer, el });
+    sendRaw({ type: "response.create", response: {
+      conversation: "none", output_modalities: ["text"], max_output_tokens: 16,
+      metadata: { purpose: "addressed", item: String(itemId) }, instructions: ADDRESSED_CHECK,
+    } });
+  }
+
+  function rtCheckDone(check) {
+    const wait = rtCheckWait.get(check.item);
+    if (!wait) return; // timed out: already answered
+    rtCheckWait.delete(check.item);
+    clearTimeout(wait.timer);
+    if (/^[\s"'«.*]*(yes|так)/i.test(check.text)) { rtRespond(); return; }
+    rtSkipped(wait.el, "");
+    eva.thinking = false;
+    showState();
+  }
+
+  // Answer the user's turn; if she is still talking, what they said is an interruption.
+  function rtRespond() {
+    if (eva.mode !== "active" || sessionEngine !== "realtime") return;
+    if (barge.audible || elevenOut.busy()) {
+      sendRaw({ type: "response.cancel" });
+      if (sessionTts === "openai") sendRaw({ type: "output_audio_buffer.clear" });
+      elevenOut.stop();
+    }
+    sendRaw({ type: "response.create" });
+  }
+
   function fromRealtime(e) {
     switch (e.type) {
       case "session.created": return { type: "session.started" };
+      case "input_audio_buffer.speech_started":
+        rtSpeechAt = Date.now();
+        return null;
+      case "input_audio_buffer.committed":
+        if (eva.mode === "active") rtTurnEnded(e.item_id);
+        return null;
       case "conversation.item.input_audio_transcription.delta":
-        rtTranscribed.add(e.item_id);
-        return { type: "session.input_transcript.delta", delta: e.delta || "" };
+        return null; // the whole turn is judged at once
       case "conversation.item.input_audio_transcription.completed":
-        if (rtTranscribed.delete(e.item_id)) return null;
-        return { type: "session.input_transcript.delta", delta: (e.transcript || "").trim() };
+        return rtHeard(e.item_id, (e.transcript || "").trim());
+      case "conversation.item.input_audio_transcription.failed":
+        return rtHeard(e.item_id, null);
       case "response.output_audio_transcript.delta":
         return { type: "session.output_transcript.delta", delta: e.delta || "" };
-      case "response.created":
+      case "response.created": {
+        const meta = (e.response && e.response.metadata) || {};
+        if (meta.purpose === "addressed") { rtChecks.set(e.response.id, { item: meta.item, text: "" }); return null; }
         elevenOut.newAnswer();
         return null;
-      case "response.output_text.delta": // ElevenLabs voices it, sentence by sentence
-        if (eva.mode !== "waiting") elevenOut.take(e.delta || "", false);
+      }
+      case "response.output_text.delta": {
+        const check = rtChecks.get(e.response_id);
+        if (check) { check.text += e.delta || ""; return null; }
+        if (eva.mode !== "waiting") elevenOut.take(e.delta || "", false); // ElevenLabs voices it, sentence by sentence
         return { type: "session.output_transcript.delta", delta: e.delta || "" };
+      }
       case "response.output_text.done":
-        if (eva.mode !== "waiting") elevenOut.take("", true);
+        if (!rtChecks.has(e.response_id) && eva.mode !== "waiting") elevenOut.take("", true);
         return null;
-      case "input_audio_buffer.speech_started":
-        // The user talks over her: Realtime cuts its own voice; ElevenLabs' is ours to stop.
-        if (sessionTts === "eleven" && elevenOut.busy()) elevenOut.stop();
+      case "response.done": {
+        const id = e.response && e.response.id;
+        const check = rtChecks.get(id);
+        if (check) { rtChecks.delete(id); rtCheckDone(check); }
         return null;
+      }
       case "error": {
         const code = e.error && e.error.code;
         return code === "response_cancel_not_active" || code === "conversation_already_has_active_response" ? null : e;
@@ -933,6 +1064,7 @@
       pc = peer;
       sessionEngine = engine;
       sessionTts = tts;
+      sessionVoiceFeminine = voiceFeminine();
       peer.ontrack = (e) => attachVoice(e.streams[0]);
       if (elevenCall()) attachVoice(null);
       // A voice switch keeps the gate too (it is built on the same mic): no new AudioContext.
@@ -1054,7 +1186,11 @@
     if (mic && !keepMic) { mic.getTracks().forEach((t) => t.stop()); mic = null; }
     channel = null;
     elevenOut.stop();
-    rtTranscribed.clear();
+    rtTurns.forEach((turn) => { clearTimeout(turn.timer); turn.el.remove(); });
+    rtTurns.clear();
+    rtCheckWait.forEach((wait) => clearTimeout(wait.timer));
+    rtCheckWait.clear();
+    rtChecks.clear();
     closeBubbles();
     bargeReset();
     barge.recentAssistant = "";
@@ -1380,6 +1516,19 @@
     if (engine === "live") {
       fetch(BACKEND + "/api/voice", { method: "POST", headers: headers(), body: JSON.stringify({ voice: id }) }).catch(() => {});
     }
+    if ((eva.mode === "active" || eva.mode === "waiting") && elevenCall() && engine === "realtime" && tts === "eleven") {
+      // ElevenLabs voices her text: the new voice speaks from the next sentence, no new call.
+      const was = sessionVoiceFeminine;
+      sessionVoice = id;
+      sessionVoiceFeminine = voiceFeminine();
+      if (was !== sessionVoiceFeminine) {
+        sendEvent({ type: "session.instructions.append", content: sessionVoiceFeminine
+          ? "Your voice is now a woman's: from now on speak about yourself in the feminine («я зрозуміла», «я записала»)."
+          : "Your voice is now a man's: from now on speak about yourself in the masculine («я зрозумів», «я записав»)." });
+      }
+      addLine("system", "Голос змінено на «" + voiceLabel(id) + "».");
+      return;
+    }
     if (eva.mode === "active") {
       const later = !voiceNow && answering();
       addLine("system", later
@@ -1511,6 +1660,7 @@
     sessionVoice = s.voice;
     sessionEngine = s.engine;
     sessionTts = s.tts;
+    sessionVoiceFeminine = (voices.find((x) => x.id === s.voice) || {}).feminine !== false;
     wireCall(s.peer, s.channel);
     attachVoice(s.stream);
     s.peer.ontrack = (e) => attachVoice(e.streams[0]);

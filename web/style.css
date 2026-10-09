@@ -153,3 +153,5 @@ footer { margin-top: 20px; text-align: center; }
 .tts-pick select, .eleven-box select { width: 100%; }
 .eleven-box { margin-top: 12px; }
 .eleven-box #elSliders { margin-top: 12px; }
+.msg.user.pending { color: var(--muted); }
+.msg.user.skipped { opacity: 0.5; font-style: italic; }
