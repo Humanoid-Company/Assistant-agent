@@ -135,15 +135,21 @@ h2 label { display: inline; margin: 0; font-weight: inherit; }
 .empty { margin: 0; }
 footer { margin-top: 20px; text-align: center; }
 
-/* GPT-Live | ElevenLabs test page */
+/* GPT-Live | Realtime switch */
 .engine { display: flex; gap: 4px; padding: 4px; margin-bottom: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
-.engine a { flex: 1 1 0; text-align: center; padding: 8px 10px; border-radius: 8px; color: var(--muted); text-decoration: none; font-weight: 600; font-size: 0.9rem; }
-.engine a[aria-current="page"] { background: var(--accent); color: var(--accent-text); }
-.engine a:not([aria-current]):hover { color: var(--text); }
 .slider-hint { margin: 0 0 10px; }
-.sample-label { display: block; margin-top: 16px; }
-#sample { width: 100%; box-sizing: border-box; resize: vertical; font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--text); }
 
 /* Delivery prompt picker */
 .prompt-pick { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
 .prompt-pick select { width: 100%; }
+
+/* Engine switch (GPT-Live | Realtime) and the Realtime voice source */
+.engine-opt { flex: 1 1 0; padding: 8px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font: inherit; font-weight: 600; font-size: 0.9rem; cursor: pointer; }
+.engine-opt[aria-checked="true"] { background: var(--accent); color: var(--accent-text); }
+.engine-opt:not([aria-checked="true"]):hover { color: var(--text); }
+.engine-opt:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.engine-info { margin: -8px 0 16px; }
+.tts-pick { margin-bottom: 12px; }
+.tts-pick select, .eleven-box select { width: 100%; }
+.eleven-box { margin-top: 12px; }
+.eleven-box #elSliders { margin-top: 12px; }

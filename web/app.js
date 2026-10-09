@@ -1,12 +1,12 @@
-// Browser side: microphone + speaker go straight to OpenAI GPT-Live over WebRTC.
-// The backend only turns our SDP offer into a session (the OpenAI key stays there) and runs
-// the tools; Google sign-in is a popup to the backend.
+// Browser side: microphone + speaker go straight to OpenAI over WebRTC — GPT-Live, or Realtime
+// (its own voice, or text that ElevenLabs voices). The backend only turns our SDP offer into a
+// session (the keys stay there) and runs the tools; Google sign-in is a popup to the backend.
+// The page speaks GPT-Live's events; for Realtime they are translated both ways (toRealtime /
+// fromRealtime), so pause, wake phrases, barge-in and voice switches work the same on both.
 (() => {
   const params = new URLSearchParams(location.search);
   const BACKEND = (params.get("backend") || (window.APP_CONFIG || {}).BACKEND_URL || "").replace(/\/$/, "");
   const $ = (id) => document.getElementById(id);
-  // The engine switch (GPT-Live | ElevenLabs test page) keeps ?backend=… and the like.
-  document.querySelectorAll("[data-keep-query]").forEach((a) => { a.href = a.getAttribute("href") + location.search; });
 
   const store = {
     get(key) { try { return localStorage.getItem(key); } catch { return null; } },
@@ -22,7 +22,7 @@
   // Voice picker: the choice lives here (the server forgets it on restart) and is sent with
   // every new call. Voice is fixed for a Live session, so a change applies from the next call.
   let voices = [];
-  let voice = store.get("va-voice") || "";
+  let voice = ""; // set below, per engine
   let speed = store.get("va-speed") || "normal";
   let style = store.get("va-style") || "normal";
   let volume = parseFloat(store.get("va-volume") || "1");
@@ -36,6 +36,17 @@
   // Delivery prompt (prompts/live_prompt.py): v2 is the usual one, v1 the older one. Picked in the
   // voice card (or ?prompt=v1); a change reopens the call, as a voice change does.
   let promptVariant = params.get("prompt") || store.get("va-prompt") || "v2";
+  // Engine: GPT-Live, or Realtime with its own preset voice (tts "openai") or ElevenLabs ("eleven").
+  // Pick on the page (or ?engine=realtime); the same functions either way.
+  let engine = (params.get("engine") || store.get("va-engine")) === "realtime" ? "realtime" : "live";
+  let tts = store.get("va-tts") === "eleven" ? "eleven" : "openai";
+  let elevenOn = false; // the server has an ElevenLabs key (/api/config)
+  let sessionEngine = "live"; // what the current call was opened with
+  let sessionTts = "openai";
+  // Each engine keeps its own voice choice (their voice lists differ).
+  const voiceKey = () => (engine === "live" ? "va-voice" : tts === "eleven" ? "el-voice" : "va-rt-voice");
+  const elevenCall = () => sessionEngine === "realtime" && sessionTts === "eleven";
+  voice = store.get(voiceKey()) || "";
   let pc = null;
   let channel = null;
   let sessionVoice = ""; // the voice the current call was opened with
@@ -497,6 +508,132 @@
     }
     setRemoteVolume(remoteLevel);
   }
+  // ── ElevenLabs voice (Realtime engine, «Голос від: ElevenLabs») ────────────────────────────────
+  // Realtime answers in text; each sentence is voiced by ElevenLabs through the backend and played
+  // into a stream that takes her usual path (the #remote element, the gate's echo meter, volume,
+  // «Чистіший звук»). The first sentence goes alone (the voice starts soonest), later ones in
+  // pieces of ~200 characters; up to two are fetched ahead.
+  const EL_SLIDERS = [
+    { key: "stability", label: "Stability", min: 0, max: 1, step: 0.05, def: 0.5,
+      hint: "Нижче — живіше й емоційніше, але менш передбачувано; вище — рівніше, може звучати монотонно." },
+    { key: "similarity", label: "Similarity", min: 0, max: 1, step: 0.05, def: 0.75,
+      hint: "Наскільки тримається тембру оригіналу. Задто високо — тягне артефакти запису." },
+    { key: "style", label: "Style", min: 0, max: 1, step: 0.05, def: 0,
+      hint: "Підсилює манеру голосу. Більше — виразніше, але повільніше генерується." },
+    { key: "speed", label: "Speed", min: 0.7, max: 1.2, step: 0.05, def: 1, hint: "Темп мовлення ElevenLabs." },
+  ];
+  const elSettings = { model: store.get("el-model") || "", boost: store.get("el-boost") !== "0" };
+  for (const sl of EL_SLIDERS) {
+    const saved = parseFloat(store.get("el-" + sl.key));
+    elSettings[sl.key] = saved >= sl.min && saved <= sl.max ? saved : sl.def;
+  }
+
+  function elevenTts(text, prev, voiceId = voice) {
+    return fetch(BACKEND + "/api/eleven/tts", {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({
+        text, previous_text: prev || "", voice_id: voiceId, model: elSettings.model || undefined,
+        stability: elSettings.stability, similarity: elSettings.similarity, style: elSettings.style,
+        speed: elSettings.speed, speaker_boost: elSettings.boost,
+      }),
+    }).then(async (res) => {
+      if (!res.ok) {
+        let detail = String(res.status);
+        try { detail = (await res.json()).detail || detail; } catch { /* not json */ }
+        throw new Error(detail);
+      }
+      return res.blob();
+    });
+  }
+
+  const elevenOut = (() => {
+    let ctx = null, player = null, dest = null;
+    let queue = [], playing = null, gen = 0, pending = "", first = true, reported = false;
+    function stream() {
+      if (!ctx) {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        ctx = new AudioCtx();
+        player = new Audio();
+        dest = ctx.createMediaStreamDestination();
+        ctx.createMediaElementSource(player).connect(dest);
+      }
+      ctx.resume().catch(() => {});
+      return dest.stream;
+    }
+    function enqueue(text) {
+      const prev = queue.length ? queue[queue.length - 1].text : playing ? playing.text : "";
+      queue.push({ text, prev });
+      pump();
+    }
+    function pump() {
+      queue.slice(0, 2).forEach((q) => { if (!q.blob) { q.blob = elevenTts(q.text, q.prev); q.blob.catch(() => {}); } });
+      if (playing || !queue.length) return;
+      const item = queue.shift();
+      playing = item;
+      const g = gen;
+      item.blob.then((blob) => {
+        if (g !== gen) return;
+        const url = URL.createObjectURL(blob);
+        player.src = url;
+        player.onended = () => { URL.revokeObjectURL(url); done(g); };
+        return player.play();
+      }).catch((err) => {
+        if (g !== gen) return;
+        if (!reported) addLine("system", "ElevenLabs: " + (err.message || err));
+        reported = true;
+        done(g);
+      });
+      pump();
+    }
+    function done(g) {
+      if (g !== gen) return;
+      playing = null;
+      pump();
+    }
+    function stop() {
+      gen += 1;
+      queue = [];
+      playing = null;
+      pending = "";
+      if (player) { player.pause(); player.removeAttribute("src"); }
+    }
+    function take(delta, finished) {
+      pending += delta;
+      for (;;) {
+        const ends = [...pending.matchAll(/[.!?…]+[»")]*\s+/g)];
+        if (!ends.length) break;
+        let cut = ends[0].index + ends[0][0].length;
+        if (!first) {
+          for (const m of ends) { if (m.index + m[0].length <= 220) cut = m.index + m[0].length; }
+          if (!finished && cut < 60 && pending.length < 220) break; // wait for a bit more
+        }
+        enqueue(pending.slice(0, cut).trim());
+        pending = pending.slice(cut);
+        first = false;
+      }
+      // A long run without a full stop: cut at the last comma so the voice can start.
+      if (first && pending.length > 140) {
+        const comma = pending.lastIndexOf(",");
+        if (comma > 40) { enqueue(pending.slice(0, comma + 1).trim()); pending = pending.slice(comma + 1); first = false; }
+      }
+      if (finished && pending.trim()) { enqueue(pending.trim()); pending = ""; }
+    }
+    return {
+      stream,
+      stop,
+      take,
+      newAnswer() { pending = ""; first = true; reported = false; },
+      busy: () => !!playing || queue.length > 0,
+    };
+  })();
+
+  // Her voice for the current call: Realtime + ElevenLabs plays our own stream, the rest WebRTC's.
+  function attachVoice(stream) {
+    if (elevenCall()) playRemote(elevenOut.stream());
+    else if (stream) playRemote(stream);
+  }
+
   const bargeLevel = () => (barge.stage === "muted" ? 0 : barge.stage === "ducked" ? 0.5 : 1);
 
   function bargeReset() {
@@ -515,6 +652,13 @@
       stop: "Stop speaking immediately. The user is talking. Do not finish or resume your previous sentence. Listen and answer what they say.",
       pause: "The user said «Дякую, Єва»: stop speaking immediately and stay completely silent. Do not reply to it. You will be woken again later — then continue with full memory of this conversation.",
     }[kind];
+    if (sessionEngine === "realtime") {
+      // Realtime: cut the answer itself; what the user says gets its own reply.
+      sendRaw({ type: "response.cancel" });
+      if (sessionTts === "openai") sendRaw({ type: "output_audio_buffer.clear" });
+      elevenOut.stop();
+      return;
+    }
     try {
       if (channel && channel.readyState === "open") {
         channel.send(JSON.stringify({
@@ -620,6 +764,10 @@
   function onServerEvent(raw) {
     let event;
     try { event = JSON.parse(raw); } catch { return; }
+    if (sessionEngine === "realtime") {
+      event = fromRealtime(event);
+      if (!event) return;
+    }
     switch (event.type) {
       case "session.started":
         applyStart();
@@ -686,11 +834,72 @@
     }, IDLE_LIMIT_MS);
   }
 
+  // Live's events as they are; for a Realtime call, translated (toRealtime).
   function sendEvent(event) {
+    const out = sessionEngine === "realtime" ? toRealtime(event) : [event];
     try {
-      if (channel && channel.readyState === "open") { channel.send(JSON.stringify(event)); return true; }
+      if (channel && channel.readyState === "open") { out.forEach((e) => channel.send(JSON.stringify(e))); return true; }
     } catch { /* channel closing */ }
     return false;
+  }
+  function sendRaw(event) {
+    try { if (channel && channel.readyState === "open") channel.send(JSON.stringify(event)); } catch { /* closing */ }
+  }
+
+  // ── Realtime ⇄ the page's Live events ──
+  const systemItem = (text) => ({
+    type: "conversation.item.create",
+    item: { type: "message", role: "system", content: [{ type: "input_text", text }] },
+  });
+  function toRealtime(event) {
+    switch (event.type) {
+      case "session.instructions.append": return [systemItem(event.content)]; // context, no reply
+      case "session.commentary.append": return [systemItem(event.content), { type: "response.create" }];
+      case "session.input_audio.mute": // paused: the model hears silence, and its answer stops
+        setMicSending(false);
+        elevenOut.stop();
+        return [{ type: "response.cancel" }];
+      case "session.input_audio.unmute": setMicSending(true); return [];
+      case "session.close": return []; // closing the peer connection ends a Realtime call
+      default: return [event];
+    }
+  }
+  function setMicSending(on) {
+    if (pc) pc.getSenders().forEach((sender) => { if (sender.track) sender.track.enabled = on; });
+  }
+
+  const rtTranscribed = new Set(); // user items whose transcript already came as deltas
+  function fromRealtime(e) {
+    switch (e.type) {
+      case "session.created": return { type: "session.started" };
+      case "conversation.item.input_audio_transcription.delta":
+        rtTranscribed.add(e.item_id);
+        return { type: "session.input_transcript.delta", delta: e.delta || "" };
+      case "conversation.item.input_audio_transcription.completed":
+        if (rtTranscribed.delete(e.item_id)) return null;
+        return { type: "session.input_transcript.delta", delta: (e.transcript || "").trim() };
+      case "response.output_audio_transcript.delta":
+        return { type: "session.output_transcript.delta", delta: e.delta || "" };
+      case "response.created":
+        elevenOut.newAnswer();
+        return null;
+      case "response.output_text.delta": // ElevenLabs voices it, sentence by sentence
+        if (eva.mode !== "waiting") elevenOut.take(e.delta || "", false);
+        return { type: "session.output_transcript.delta", delta: e.delta || "" };
+      case "response.output_text.done":
+        if (eva.mode !== "waiting") elevenOut.take("", true);
+        return null;
+      case "input_audio_buffer.speech_started":
+        // The user talks over her: Realtime cuts its own voice; ElevenLabs' is ours to stop.
+        if (sessionTts === "eleven" && elevenOut.busy()) elevenOut.stop();
+        return null;
+      case "error": {
+        const code = e.error && e.error.code;
+        return code === "response_cancel_not_active" || code === "conversation_already_has_active_response" ? null : e;
+      }
+      default:
+        return null;
+    }
   }
   const eventId = (prefix) => prefix + "_" + Math.random().toString(16).slice(2, 10);
   // Context the model acts on right away (it answers it out loud).
@@ -722,7 +931,10 @@
       mic = stream;
       const peer = new RTCPeerConnection();
       pc = peer;
-      peer.ontrack = (e) => playRemote(e.streams[0]);
+      sessionEngine = engine;
+      sessionTts = tts;
+      peer.ontrack = (e) => attachVoice(e.streams[0]);
+      if (elevenCall()) attachVoice(null);
       // A voice switch keeps the gate too (it is built on the same mic): no new AudioContext.
       if (gate && (gate.stream !== mic || !gate.alive())) { gate.close(); gate = null; }
       if (!gate) {
@@ -730,8 +942,9 @@
         if (my !== attempt) { if (newGate) newGate.close(); return; }
         gate = newGate;
       }
-      if (gate) peer.addTrack(gate.track, mic);
-      else mic.getTracks().forEach((track) => peer.addTrack(track, mic));
+      // A paused Realtime call switched the track off (Live mutes on the server): on again.
+      if (gate) { gate.track.enabled = true; peer.addTrack(gate.track, mic); }
+      else mic.getTracks().forEach((track) => { track.enabled = true; peer.addTrack(track, mic); });
       channel = peer.createDataChannel("oai-events");
       wireCall(peer, channel);
 
@@ -741,7 +954,7 @@
       const res = await fetch(BACKEND + "/api/session", {
         method: "POST",
         headers: headers(),
-        body: JSON.stringify({ sdp: withClearOpus(offer.sdp), voice: voice || undefined, speed, style, prompt: promptVariant, user_text: opts.userText || undefined }),
+        body: JSON.stringify(sessionBody({ sdp: withClearOpus(offer.sdp), user_text: opts.userText || undefined })),
       });
       if (my !== attempt) return;
       if (res.status === 401) {
@@ -759,6 +972,13 @@
       stop("Не вдалося підключитись", "err");
     }
   }
+
+  // What a new call is opened with: voice, delivery, engine.
+  const voiceFeminine = () => (voices.find((x) => x.id === voice) || {}).feminine !== false;
+  const sessionBody = (extra) => Object.assign({
+    voice: voice || undefined, speed, style, prompt: promptVariant,
+    engine, tts: engine === "realtime" ? tts : undefined, feminine: voiceFeminine(),
+  }, extra);
 
   // The offer's Opus line says how we want to receive her voice. Browser defaults leave the bitrate
   // to the sender, and a low one smears «с», «ш», «ц» (they live at 4–12 kHz) — she sounded lisped.
@@ -833,6 +1053,8 @@
     else if (gate) { gate.close(); gate = null; }
     if (mic && !keepMic) { mic.getTracks().forEach((t) => t.stop()); mic = null; }
     channel = null;
+    elevenOut.stop();
+    rtTranscribed.clear();
     closeBubbles();
     bargeReset();
     barge.recentAssistant = "";
@@ -1075,9 +1297,9 @@
     showState();
     const me = await fetchMe();
     if (eva.mode !== "connecting") return; // the user did something meanwhile
-    if (me && me.reconnect && voices.some((x) => x.id === me.voice)) {
+    if (me && me.reconnect && engine === "live" && voices.some((x) => x.id === me.voice)) {
       voice = me.voice;
-      store.set("va-voice", voice);
+      store.set(voiceKey(), voice);
       showVoice();
       addLine("system", "Голос змінено на «" + voiceLabel(voice) + "»" + (me.voice_note ? " (" + me.voice_note + ")" : "") + ".");
       eva.mode = "switching";
@@ -1101,12 +1323,31 @@
     $("voiceApply").hidden = !picked || picked.id === voice;
   }
 
+  // The picker lists the current engine's voices: GPT-Live's, Realtime's presets, or the
+  // ElevenLabs account's voices.
   async function loadVoices() {
     try {
-      const res = await fetch(BACKEND + "/api/voices");
-      if (!res.ok) return;
-      const data = await res.json();
+      let data;
+      if (engine === "realtime" && tts === "eleven") {
+        const res = await fetch(BACKEND + "/api/eleven/voices", { headers: headers() });
+        if (!res.ok) { addLine("system", "Не вдалося завантажити голоси ElevenLabs (" + res.status + ")."); return; }
+        const raw = await res.json();
+        const gender = (g) => (g === "male" ? "чоловічий" : g === "female" ? "жіночий" : "");
+        data = {
+          default: raw.default,
+          voices: (raw.voices || []).map((v) => ({
+            id: v.id, label: v.name, feminine: v.gender !== "male",
+            description: [gender(v.gender), v.description].filter(Boolean).join(" · "),
+          })),
+        };
+        showElevenModels(raw.models || {}, raw.default_model);
+      } else {
+        const res = await fetch(BACKEND + "/api/voices" + (engine === "realtime" ? "?engine=realtime" : ""));
+        if (!res.ok) return;
+        data = await res.json();
+      }
       voices = data.voices || [];
+      voice = store.get(voiceKey()) || "";
       if (!voices.some((x) => x.id === voice)) voice = data.default;
       if (!voices.some((x) => x.id === voice) && voices.length) voice = voices[0].id;
       const group = (label, list) => {
@@ -1132,10 +1373,13 @@
     const id = $("voice").value;
     if (!voices.some((x) => x.id === id) || id === voice) return;
     voice = id;
-    store.set("va-voice", id);
+    store.set(voiceKey(), id);
     showVoice();
-    // Not awaited: the new call carries the voice itself (/api/session), this only keeps the server in step.
-    fetch(BACKEND + "/api/voice", { method: "POST", headers: headers(), body: JSON.stringify({ voice: id }) }).catch(() => {});
+    // Not awaited: the new call carries the voice itself (/api/session), this only keeps the server
+    // in step (it remembers Live's voice; the others live only here).
+    if (engine === "live") {
+      fetch(BACKEND + "/api/voice", { method: "POST", headers: headers(), body: JSON.stringify({ voice: id }) }).catch(() => {});
+    }
     if (eva.mode === "active") {
       const later = !voiceNow && answering();
       addLine("system", later
@@ -1167,7 +1411,7 @@
     standby = null;
     if (!s) return;
     clearTimeout(s.timer);
-    try { if (s.channel.readyState === "open") s.channel.send(JSON.stringify({ type: "session.close" })); } catch { /* closing */ }
+    try { if (s.engine === "live" && s.channel.readyState === "open") s.channel.send(JSON.stringify({ type: "session.close" })); } catch { /* closing */ }
     s.peer.close();
   }
 
@@ -1195,7 +1439,7 @@
   async function switchVoiceFast(announce = false, command = false) {
     dropStandby();
     if (!pc || !mic) { restartSession("switching", { switched: true }); return; }
-    const s = { voice, mark: logMark(), ready: false, announce, command };
+    const s = { voice, engine, tts, mark: logMark(), ready: false, announce, command };
     standby = s;
     const fail = () => {
       if (standby !== s) return;
@@ -1214,7 +1458,7 @@
         if (standby !== s) return;
         let event;
         try { event = JSON.parse(e.data); } catch { return; }
-        if (event.type === "session.started") { s.ready = true; s.readyAt = Date.now(); clearTimeout(s.timer); swapWhenQuiet(s); }
+        if (event.type === "session.started" || event.type === "session.created") { s.ready = true; s.readyAt = Date.now(); clearTimeout(s.timer); swapWhenQuiet(s); }
         else if (event.type === "session.closed") fail();
       };
       s.channel.onclose = fail;
@@ -1224,7 +1468,7 @@
         method: "POST",
         headers: headers(),
         // keep_old: the current call goes on until the page swaps (the server would end it).
-        body: JSON.stringify({ sdp: withClearOpus(offer.sdp), voice: s.voice, speed, style, prompt: promptVariant, keep_old: true }),
+        body: JSON.stringify(sessionBody({ sdp: withClearOpus(offer.sdp), voice: s.voice, keep_old: true })),
       });
       if (standby !== s) return;
       if (!res.ok) throw new Error("session " + res.status);
@@ -1265,11 +1509,15 @@
     pc = s.peer;
     channel = s.channel;
     sessionVoice = s.voice;
+    sessionEngine = s.engine;
+    sessionTts = s.tts;
     wireCall(s.peer, s.channel);
-    if (s.stream) playRemote(s.stream);
-    s.peer.ontrack = (e) => playRemote(e.streams[0]);
+    attachVoice(s.stream);
+    s.peer.ontrack = (e) => attachVoice(e.streams[0]);
     try {
-      await s.sender.replaceTrack(gate ? gate.track : mic.getAudioTracks()[0]);
+      const track = gate ? gate.track : mic.getAudioTracks()[0];
+      track.enabled = true;
+      await s.sender.replaceTrack(track);
     } catch { /* closed meanwhile: its close handler takes over */ }
     if (pc !== s.peer) return;
     setRemoteVolume(1);
@@ -1392,8 +1640,23 @@
     preview = null;
     $("voicePreview").textContent = "▶ Прослухати";
   }
+  const EL_PREVIEW = "Привіт! Завтра в тебе вільний ранок, а о пів на третю — зустріч. Слухай, а що як перенести її на четвер?";
   function togglePreview() {
     if (preview) { stopPreview(); return; }
+    if (engine === "realtime" && tts === "eleven") {
+      const picked = $("voice").value;
+      const audio = new Audio();
+      preview = audio;
+      $("voicePreview").textContent = "■ Стоп";
+      elevenTts(EL_PREVIEW, "", picked).then((blob) => {
+        if (preview !== audio) return;
+        audio.src = URL.createObjectURL(blob);
+        audio.volume = volume;
+        audio.onended = stopPreview;
+        return audio.play();
+      }).catch((err) => { stopPreview(); addLine("system", "ElevenLabs: " + (err.message || err)); });
+      return;
+    }
     const audio = new Audio("samples/" + encodeURIComponent($("voice").value) + ".m4a");
     audio.volume = volume;
     audio.onended = stopPreview;
@@ -1406,6 +1669,7 @@
   // «зміни голос …» in the Live transcript too (browsers without a recogniser, or it missed it):
   // once the user pauses, like voice/options.py on the server — which now waits for the page.
   function checkVoiceRequest(delta) {
+    if (sessionEngine !== "live") return; // Realtime: the voice is picked on the page
     eva.inputBuf = (eva.inputBuf + delta).slice(-300);
     clearTimeout(eva.voiceCheckTimer);
     if (!VOICE_REQUEST_RE.test(eva.inputBuf)) return;
@@ -1419,14 +1683,14 @@
   // Heard «зміни голос …» ourselves: the page switches without a gap; the server's own transcript
   // check is only a fallback (it waits longer and dedups with this).
   async function requestVoiceChange(text) {
-    if (eva.voiceRequestBusy) return;
+    if (eva.voiceRequestBusy || sessionEngine !== "live") return;
     eva.voiceRequestBusy = true;
     try {
       const res = await fetch(BACKEND + "/api/voice-request", { method: "POST", headers: headers(), body: JSON.stringify({ text }) });
       const data = res.ok ? await res.json() : null;
       if (data && data.switched && eva.mode === "active" && voices.some((x) => x.id === data.voice)) {
         voice = data.voice;
-        store.set("va-voice", voice);
+        store.set(voiceKey(), voice);
         showVoice();
         addLine("system", "Голос змінено на «" + voiceLabel(voice) + "» (почула: «" + text.trim().slice(0, 80) + "»).");
         // The old call goes on for a few seconds: it must not answer the request meanwhile.
@@ -1463,9 +1727,9 @@
       if (!me) return;
       const { google, voice: serverVoice, speed: serverSpeed, style: serverStyle } = me;
       // Set on the server only when chosen there (e.g. asked by voice) — adopt it then.
-      if (serverVoice && serverVoice !== voice && voices.some((x) => x.id === serverVoice)) {
+      if (engine === "live" && serverVoice && serverVoice !== voice && voices.some((x) => x.id === serverVoice)) {
         voice = serverVoice;
-        store.set("va-voice", voice);
+        store.set(voiceKey(), voice);
         showVoice();
       }
       // «Говори повільніше» by voice: show it (a restarted server reports "normal" — keep ours then).
@@ -1541,8 +1805,78 @@
     else if (eva.mode === "waiting") restartSession("switching", {});
   }
 
+  // ── engine: GPT-Live | Realtime (voice from OpenAI or ElevenLabs) ──
+  const ENGINE_INFO = {
+    live: "GPT-Live: найживіша розмова — підтакує, поки ви говорите, чує тон голосу.",
+    realtime: "Realtime: відповідає, коли ви договорили. Голос OpenAI або ElevenLabs. Пошта, календар і нотатки — " +
+      "так само, через той самий «мозок». Голос міняється тут, на сторінці.",
+  };
+  function showEngine() {
+    document.querySelectorAll(".engine-opt").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.engine === engine)));
+    $("engineInfo").textContent = ENGINE_INFO[engine];
+    $("ttsPick").hidden = engine !== "realtime";
+    $("tts").value = tts;
+    $("tts").querySelector('option[value="eleven"]').disabled = !elevenOn;
+    $("elevenBox").hidden = !(engine === "realtime" && tts === "eleven");
+  }
+
+  // A new engine or voice source: its voices in the picker, and a running call moves over (a
+  // new call beside the current one, as for a voice change — memory carries over).
+  async function changeEngine(nextEngine, nextTts) {
+    if (nextEngine === engine && nextTts === tts) return;
+    engine = nextEngine;
+    tts = nextTts;
+    store.set("va-engine", engine);
+    store.set("va-tts", tts);
+    stopPreview();
+    showEngine();
+    await loadVoices();
+    if (eva.mode === "active") switchVoiceFast(false, true);
+    else if (eva.mode === "waiting") restartSession("switching", {});
+  }
+
+  function showElevenModels(models, fallback) {
+    const ids = Object.keys(models);
+    if (!ids.includes(elSettings.model)) elSettings.model = ids.includes(fallback) ? fallback : ids[0] || "";
+    $("elModel").replaceChildren(...ids.map((id) => new Option(models[id], id, false, id === elSettings.model)));
+  }
+
+  function renderElevenSliders() {
+    const box = $("elSliders");
+    box.replaceChildren();
+    for (const sl of EL_SLIDERS) {
+      const row = document.createElement("div");
+      row.className = "label-row";
+      const label = document.createElement("label");
+      label.htmlFor = "el-" + sl.key;
+      label.textContent = sl.label;
+      const value = document.createElement("span");
+      value.className = "muted small";
+      value.textContent = elSettings[sl.key].toFixed(2);
+      row.append(label, value);
+      const input = document.createElement("input");
+      Object.assign(input, { type: "range", id: "el-" + sl.key, min: sl.min, max: sl.max, step: sl.step, value: elSettings[sl.key] });
+      input.addEventListener("input", () => {
+        elSettings[sl.key] = parseFloat(input.value);
+        value.textContent = elSettings[sl.key].toFixed(2);
+        store.set("el-" + sl.key, String(elSettings[sl.key]));
+      });
+      const hint = document.createElement("p");
+      hint.className = "hint slider-hint";
+      hint.textContent = sl.hint;
+      box.append(row, input, hint);
+    }
+  }
+
   async function init() {
     $("talk").addEventListener("click", () => (eva.mode === "off" ? start(defaultStart()) : stop()));
+    document.querySelectorAll(".engine-opt").forEach((b) => b.addEventListener("click", () => changeEngine(b.dataset.engine, tts)));
+    $("tts").addEventListener("change", () => changeEngine(engine, $("tts").value));
+    $("elModel").addEventListener("change", () => { elSettings.model = $("elModel").value; store.set("el-model", elSettings.model); });
+    $("elBoost").checked = elSettings.boost;
+    $("elBoost").addEventListener("change", () => { elSettings.boost = $("elBoost").checked; store.set("el-boost", elSettings.boost ? "1" : "0"); });
+    renderElevenSliders();
+    showEngine();
     $("pause").addEventListener("click", pauseEva);
     $("resume").addEventListener("click", () => wakeEva(""));
     $("bgListen").addEventListener("change", toggleBgListen);
@@ -1589,6 +1923,9 @@
     if (cfg) {
       if (cfg.access_code_required && !accessCode) showGate();
       if (!cfg.google_login) $("googleConnect").disabled = true;
+      elevenOn = Boolean(cfg.eleven);
+      if (!elevenOn && tts === "eleven") { tts = "openai"; store.set("va-tts", tts); }
+      showEngine();
       await loadVoices();
       refreshMe();
     }

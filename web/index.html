@@ -11,10 +11,11 @@
 </head>
 <body>
   <main class="wrap">
-    <nav class="engine" aria-label="Голосовий двигун">
-      <a href="./" data-keep-query aria-current="page">GPT-Live</a>
-      <a href="eleven" data-keep-query>ElevenLabs · тест</a>
-    </nav>
+    <div class="engine" role="radiogroup" aria-label="Голосовий двигун">
+      <button type="button" class="engine-opt" data-engine="live" role="radio">GPT-Live</button>
+      <button type="button" class="engine-opt" data-engine="realtime" role="radio">Realtime</button>
+    </div>
+    <p id="engineInfo" class="hint engine-info"></p>
     <header>
       <h1>Єва</h1>
       <p class="sub">Голосова помічниця: календар, пошта, нотатки, пошук. Говоріть з нею як з людиною.</p>
@@ -50,6 +51,13 @@
 
     <section class="card">
       <h2><label for="voice">Голос Єви</label></h2>
+      <div id="ttsPick" class="tts-pick" hidden>
+        <label for="tts">Голос від</label>
+        <select id="tts">
+          <option value="openai">OpenAI — вбудований голос Realtime</option>
+          <option value="eleven">ElevenLabs</option>
+        </select>
+      </div>
       <div class="row voice-pick">
         <select id="voice" disabled>
           <option>Завантаження…</option>
@@ -58,6 +66,19 @@
       </div>
       <p id="voiceInfo" class="hint"></p>
       <button id="voiceApply" class="btn primary wide" hidden>Застосувати</button>
+      <div id="elevenBox" class="eleven-box" hidden>
+        <label for="elModel">Модель ElevenLabs</label>
+        <select id="elModel"></select>
+        <div id="elSliders"></div>
+        <label class="setting" for="elBoost">
+          <span class="setting-text">
+            <span class="setting-title">Speaker boost</span>
+            <span class="hint">Ближче до оригінального тембру, трохи повільніше.</span>
+          </span>
+          <input id="elBoost" type="checkbox" class="switch" role="switch" checked>
+        </label>
+        <p class="hint">Діє з наступного речення. Кожна відповідь витрачає кредити ElevenLabs (≈ символ за кредит).</p>
+      </div>
       <div class="settings">
         <div>
           <label for="speed">Темп</label>
