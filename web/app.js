@@ -340,7 +340,6 @@
     $("talk").disabled = false;
     $("resume").hidden = eva.mode !== "waiting";
     $("pause").hidden = eva.mode !== "active";
-    $("pronTest").disabled = eva.mode !== "active" || !!pron;
     $("wakeHint").textContent = eva.wakeSupported
       ? "Покличте Єву — «Єва, скажи», «Привіт, Єва», «Гей, Єва», «Єво, слухай». «Дякую, Єва» — пауза. Браузер попросить доступ до мікрофона."
       : "Цей браузер не вміє слухати «Єва, скажи» (потрібен Chrome, Edge або Safari) — користуйтеся кнопками «Пауза» / «Продовжити». «Дякую, Єва» працює.";
@@ -460,14 +459,11 @@
       // sound "better" in a side-by-side comparison.
       const makeup = new GainNode(ctx, { gain: 1 });
       const volumeNode = new GainNode(ctx, { gain: 1 });
-      const record = ctx.createMediaStreamDestination(); // what the pronunciation test records
       highpass.connect(presence).connect(deEsser).connect(comp).connect(makeup).connect(volumeNode);
       volumeNode.connect(ctx.destination);
-      makeup.connect(record);
       let source = null;
       return {
         on: false,
-        recordStream: record.stream,
         attach(stream) {
           if (source) source.disconnect();
           source = ctx.createMediaStreamSource(stream);
@@ -1529,52 +1525,6 @@
 
   function showGate() { $("gate").hidden = false; $("code").focus(); }
 
-  // ── Pronunciation test: a fixed phrase in the current voice, recorded for side-by-side listening ──
-  const PRON_PHRASE = "Саша йшла шосе й сушила сушку. Шість шишок, сорок сорок і цукерки для щасливих. " +
-    "Зустріч у четвер, двадцять п'ятого жовтня, о пів на третю — не забудь!";
-  let pron = null;
-
-  function pronTest() {
-    if (eva.mode !== "active" || pron || !$("remote").srcObject) return;
-    let recorder;
-    const processed = !!(fx && fx.on);
-    try { recorder = new MediaRecorder(processed ? fx.recordStream : $("remote").srcObject); } catch { addLine("system", "Цей браузер не вміє записувати звук."); return; }
-    const label = voiceLabel(sessionVoice || voice) + " · промпт " + promptVariant + (processed ? " · чистіший звук" : "");
-    const chunks = [];
-    pron = { recorder, heard: false, started: Date.now() };
-    recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
-    recorder.onstop = () => {
-      const kept = pron && pron.heard;
-      pron = null;
-      updateButtons();
-      if (!kept || !chunks.length) { addLine("system", "Тест вимови: Єва нічого не сказала — спробуйте ще раз."); return; }
-      const item = document.createElement("div");
-      item.className = "pron-item";
-      const name = document.createElement("span");
-      name.textContent = label;
-      const player = document.createElement("audio");
-      player.controls = true;
-      player.src = URL.createObjectURL(new Blob(chunks, { type: recorder.mimeType }));
-      item.append(name, player);
-      $("pronList").prepend(item);
-    };
-    recorder.start();
-    updateButtons();
-    commentary("Pronunciation test from the page (not the user speaking): say exactly this text once, word for word, " +
-      "in your normal voice and manner — nothing before or after it, no comment: «" + PRON_PHRASE + "»");
-    // Stop once she has spoken and gone quiet (a pause between sentences is shorter), or after 25 s.
-    const watch = setInterval(() => {
-      if (!pron || pron.recorder !== recorder) { clearInterval(watch); return; }
-      if (barge.audible) pron.heard = true;
-      if (!gate && Date.now() - pron.started > 12000) pron.heard = true; // ?gate=off: no level to watch, take 12 s
-      const quiet = !barge.audible && Date.now() - eva.lastAudibleAt > 1500;
-      if ((pron.heard && (quiet || !gate)) || Date.now() - pron.started > 25000 || eva.mode !== "active") {
-        clearInterval(watch);
-        recorder.stop();
-      }
-    }, 200);
-  }
-
   const PROMPT_INFO = {
     v1: "Як гарно звучати: тепло, спокійно, плавно, з вдихами й «хм»; вимова розписана детально. " +
       "Може тягнути в манеру диктора.",
@@ -1598,7 +1548,6 @@
     $("bgListen").addEventListener("change", toggleBgListen);
     showBgListen();
     $("voiceNow").addEventListener("change", toggleVoiceNow);
-    $("pronTest").addEventListener("click", pronTest);
     $("cleanVoice").checked = cleanVoice;
     $("cleanVoice").addEventListener("change", toggleCleanVoice);
     $("promptVariant").value = promptVariant === "v1" ? "v1" : "v2";
