@@ -38,6 +38,9 @@ REALTIME_VOICE: str = "marin"
 # Pause (ms) that ends a user turn. Every ms here is added to each reply's latency;
 # lower = snappier, but too low cuts people off mid-thought.
 REALTIME_SILENCE_MS: int = int(os.getenv("REALTIME_SILENCE_MS", "600"))
+# Web page's Realtime engine: "semantic" — a model judges that the user has finished (like Live,
+# no cut-off at a pause mid-thought); "server" — plain silence of REALTIME_SILENCE_MS.
+REALTIME_TURN_DETECTION: str = os.getenv("REALTIME_TURN_DETECTION", "semantic").strip().lower()
 STT_REALTIME_MODEL: str = "gpt-4o-mini-transcribe"
 STT_REALTIME_LANGUAGE: str = "uk"
 

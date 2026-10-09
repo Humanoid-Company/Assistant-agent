@@ -89,6 +89,8 @@ def test_realtime_session_config():
     assert spoken["output_modalities"] == ["audio"]
     assert spoken["audio"]["output"] == {"voice": "marin", "speed": 1.12}
     assert spoken["audio"]["input"]["transcription"]["language"] == "uk"
+    vad = spoken["audio"]["input"]["turn_detection"]
+    assert vad["create_response"] is False and vad["interrupt_response"] is False  # the page decides
     text = realtime_session(instructions="I", language="uk", voice=None)
     assert text["output_modalities"] == ["text"] and "output" not in text["audio"]
     assert text["tools"] == REALTIME_TOOLS
@@ -269,3 +271,29 @@ def test_bridge_ignores_answers_without_tools():
         return bridge
 
     assert not asyncio.run(scenario())._tool_tasks
+
+
+def test_turn_detection_semantic_by_default(monkeypatch):
+    import server.realtime_engine as engine
+
+    vad = realtime_session(instructions="I", language="uk", voice="marin")["audio"]["input"]["turn_detection"]
+    assert vad["type"] == "semantic_vad"
+    monkeypatch.setattr(engine, "REALTIME_TURN_DETECTION", "server")
+    vad = realtime_session(instructions="I", language="uk", voice="marin")["audio"]["input"]["turn_detection"]
+    assert vad["type"] == "server_vad" and vad["create_response"] is False
+
+
+def test_bridge_keeps_the_pages_checks_out_of_the_conversation():
+    async def scenario():
+        log = ConversationLog()
+        bridge = RealtimeBridge(client=None, call_id="rtc_3", executor=_FakeExecutor(), brain=None, conversation=log)
+        bridge._connection = _FakeConnection()
+        await bridge._handle_event({"type": "response.created", "response": {"id": "r_check", "metadata": {"purpose": "addressed"}}})
+        await bridge._handle_event({"type": "response.output_text.done", "response_id": "r_check", "text": "no"})
+        await bridge._handle_event({"type": "response.done", "response": {"id": "r_check", "output": []}})
+        await bridge._handle_event({"type": "response.output_text.done", "response_id": "r_real", "text": "Привіт!"})
+        return log, bridge
+
+    log, bridge = asyncio.run(scenario())
+    assert [t.text for t in log.turns()] == ["Привіт!"]
+    assert not bridge._side_responses

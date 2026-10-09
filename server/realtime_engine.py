@@ -19,7 +19,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
-from config import REALTIME_MODEL, REALTIME_SILENCE_MS, STT_REALTIME_MODEL
+from config import REALTIME_MODEL, REALTIME_SILENCE_MS, REALTIME_TURN_DETECTION, STT_REALTIME_MODEL
 from tools.executor import ToolExecutionContext, ToolExecutor
 from tools.live_schemas import LIVE_BACKEND_TOOLS
 from voice.conversation import ConversationLog, remember_tool_result
@@ -69,6 +69,21 @@ def history_text(log: ConversationLog, max_chars: int = _HISTORY_CHARS) -> str:
     return out[-max_chars:]
 
 
+def _turn_detection() -> dict:
+    # The page decides whether to answer, once it knows the words and whether the voice was near
+    # the mic: a cough, a quiet «угу» or the TV is a turn to VAD, and Realtime (unlike Live) answered
+    # them. For the same reason a sound doesn't cut her off — the page's barge-in does that.
+    if REALTIME_TURN_DETECTION == "server":
+        return {
+            "type": "server_vad",
+            "silence_duration_ms": REALTIME_SILENCE_MS,
+            "create_response": False,
+            "interrupt_response": False,
+        }
+    # The end of a turn judged by meaning, like Live: no cut-off at a pause mid-thought.
+    return {"type": "semantic_vad", "eagerness": "auto", "create_response": False, "interrupt_response": False}
+
+
 def realtime_session(
     *, instructions: str, language: str, voice: str | None, speed: str = "normal"
 ) -> dict:
@@ -77,12 +92,7 @@ def realtime_session(
         "input": {
             "noise_reduction": {"type": "near_field"},
             "transcription": {"model": STT_REALTIME_MODEL, "language": language},
-            "turn_detection": {
-                "type": "server_vad",
-                "silence_duration_ms": REALTIME_SILENCE_MS,
-                "create_response": True,
-                "interrupt_response": True,
-            },
+            "turn_detection": _turn_detection(),
         }
     }
     if voice:
@@ -208,6 +218,8 @@ class RealtimeBridge:
         self._closed = asyncio.Event()
         self._tool_tasks: set[asyncio.Task] = set()
         self._user_turns: list[str] = []
+        # The page's «is this addressed to you?» checks (out of band): not part of the conversation.
+        self._side_responses: set[str] = set()
         self.end_requested = False
         self.restart_for_voice = False  # set by change_voice on Live calls; nothing to restart here
 
@@ -278,6 +290,13 @@ class RealtimeBridge:
 
     async def _handle_event(self, event: Any) -> None:
         etype = _attr(event, "type")
+        if etype == "response.created":
+            response = _attr(event, "response")
+            if (_attr(response, "metadata") or {}).get("purpose"):
+                self._side_responses.add(_attr(response, "id"))
+            return
+        if _attr(event, "response_id") in self._side_responses:
+            return
         if etype == "conversation.item.input_audio_transcription.completed":
             text = (_attr(event, "transcript") or "").strip()
             if text:
@@ -295,6 +314,9 @@ class RealtimeBridge:
             logger.error("realtime.error call_id=%s detail=%s", self.session_id, _attr(event, "error") or event)
             return
         if etype != "response.done":
+            return
+        if _attr(_attr(event, "response"), "id") in self._side_responses:
+            self._side_responses.discard(_attr(_attr(event, "response"), "id"))
             return
         calls = [
             item for item in (_attr(_attr(event, "response"), "output") or [])
