@@ -25,14 +25,22 @@ from voice.conversation import ConversationLog, remember_tool_result
 logger = logging.getLogger(__name__)
 
 ELEVEN_API = "https://api.elevenlabs.io"
-# Offered on the page, fastest first. language_code (forcing Ukrainian) only works on the v2.5 ones.
+# Offered on the page. Flash v2.5 is the default: known to take every setting sent here.
 ELEVEN_MODELS: dict[str, str] = {
-    "eleven_flash_v2_5": "Flash v2.5 — найшвидша",
+    "eleven_flash_v2_5": "Flash v2.5 — швидка, перевірена",
+    "eleven_v4_turbo": "v4 Turbo — швидка й емоційна (нова)",
+    "eleven_v4": "v4 — найживіша (нова)",
+    "eleven_v3_conversational": "v3 Conversational — для розмови",
     "eleven_turbo_v2_5": "Turbo v2.5",
-    "eleven_multilingual_v2": "Multilingual v2 — найякісніша",
-    "eleven_v3": "v3 — найвиразніша, повільна",
+    "eleven_multilingual_v2": "Multilingual v2 — стабільна",
+    "eleven_v3": "v3 — виразна, повільна",
 }
-_LANGUAGE_CODE_MODELS = {"eleven_flash_v2_5", "eleven_turbo_v2_5"}
+# language_code (forcing Ukrainian) is rejected by multilingual_v2 only.
+_NO_LANGUAGE_CODE_MODELS = {"eleven_multilingual_v2"}
+# Request stitching (previous_text) is documented for the v2 / v2.5 models; v3 and newer: unknown.
+_PREVIOUS_TEXT_MODELS = {"eleven_flash_v2_5", "eleven_turbo_v2_5", "eleven_multilingual_v2"}
+# v3 takes only three stability steps (creative / natural / robust).
+_STABILITY_STEPS_MODELS = {"eleven_v3", "eleven_v3_conversational"}
 # One sentence or two at a time; a cap so a runaway reply can't burn the month's credits.
 MAX_TTS_CHARS = 800
 # Voice and its settings are picked on the page in this mode.
@@ -60,20 +68,23 @@ class TtsRequest(BaseModel):
 def tts_payload(req: TtsRequest) -> dict:
     """ElevenLabs request body from the page's settings, every value kept in its allowed range."""
     model = req.model if req.model in ELEVEN_MODELS else "eleven_flash_v2_5"
+    stability = _clamp(req.stability, 0.0, 1.0)
+    if model in _STABILITY_STEPS_MODELS:
+        stability = min((0.0, 0.5, 1.0), key=lambda step: abs(step - stability))
     payload: dict[str, Any] = {
         "text": req.text.strip()[:MAX_TTS_CHARS],
         "model_id": model,
         "voice_settings": {
-            "stability": _clamp(req.stability, 0.0, 1.0),
+            "stability": stability,
             "similarity_boost": _clamp(req.similarity, 0.0, 1.0),
             "style": _clamp(req.style, 0.0, 1.0),
             "speed": _clamp(req.speed, 0.7, 1.2),
             "use_speaker_boost": req.speaker_boost,
         },
     }
-    if req.previous_text.strip() and model != "eleven_v3":
+    if req.previous_text.strip() and model in _PREVIOUS_TEXT_MODELS:
         payload["previous_text"] = req.previous_text.strip()[-MAX_TTS_CHARS:]
-    if model in _LANGUAGE_CODE_MODELS and req.language in ("uk", "en", "ru"):
+    if model not in _NO_LANGUAGE_CODE_MODELS and req.language in ("uk", "en", "ru"):
         payload["language_code"] = req.language
     return payload
 

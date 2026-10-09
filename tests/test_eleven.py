@@ -29,10 +29,15 @@ def test_tts_payload_keeps_settings_in_range():
 
 def test_tts_payload_per_model():
     v2 = tts_payload(TtsRequest(text="Так.", voice_id="v", model="eleven_multilingual_v2", previous_text="Ну."))
-    assert "language_code" not in v2  # only the v2.5 models accept it
+    assert "language_code" not in v2  # multilingual_v2 rejects it
     assert v2["previous_text"] == "Ну."
-    v3 = tts_payload(TtsRequest(text="Так.", voice_id="v", model="eleven_v3", previous_text="Ну."))
+    v3 = tts_payload(TtsRequest(text="Так.", voice_id="v", model="eleven_v3", previous_text="Ну.", stability=0.3))
     assert "previous_text" not in v3
+    assert v3["voice_settings"]["stability"] == 0.5  # v3: only 0 / 0.5 / 1
+    assert v3["language_code"] == "uk"
+    v4 = tts_payload(TtsRequest(text="Так.", voice_id="v", model="eleven_v4_turbo", previous_text="Ну.", stability=0.3))
+    assert v4["model_id"] == "eleven_v4_turbo" and "previous_text" not in v4
+    assert v4["voice_settings"]["stability"] == 0.3
     unknown = tts_payload(TtsRequest(text="Так.", voice_id="v", model="gpt-whatever"))
     assert unknown["model_id"] == "eleven_flash_v2_5"
 

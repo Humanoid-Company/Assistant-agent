@@ -322,6 +322,11 @@ async def eleven_tts(
         audio = await eleven.tts(body)
     except ElevenLabsError as exc:
         logger.warning("eleven.tts_failed status=%s detail=%s", exc.status, exc.detail)
+        if "quota_exceeded" in exc.detail:
+            raise HTTPException(
+                status_code=402,
+                detail="закінчились кредити — або акаунта, або ліміт самого API-ключа (ElevenLabs → API Keys)",
+            ) from exc
         raise HTTPException(status_code=502, detail=f"eleven_{exc.status}: {exc.detail}") from exc
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail="eleven_unreachable") from exc
