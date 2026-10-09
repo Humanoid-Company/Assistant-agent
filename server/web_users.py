@@ -82,7 +82,10 @@ class WebUser:
     # What people nearby said while Єва was paused — handed to her on the next wake.
     background: BackgroundLog = field(default_factory=lambda: BackgroundLog(_summarize_background))
     last_seen: float = field(default_factory=time.time)
-    bridges: set[Any] = field(default_factory=set)  # live SidebandToolBridge objects
+    bridges: set[Any] = field(default_factory=set)  # open calls: SidebandToolBridge / RealtimeBridge
+    # The Realtime engine's backend thread (previous_response_id): kept across calls, so a «так»
+    # after a pause still confirms the operation it asked about.
+    brain_state: dict = field(default_factory=dict)
 
     def switch_voice_by_request(self, utterance: str) -> bool:
         """«Єва, зміни голос на …» heard in the transcript: switch now (the page reconnects)."""

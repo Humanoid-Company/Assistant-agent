@@ -55,8 +55,8 @@ OPENAI_LIVE_BACKEND_EFFORT: str = os.getenv("OPENAI_LIVE_BACKEND_EFFORT", "").st
 OPENAI_LIVE_VOICE: str = os.getenv("OPENAI_LIVE_VOICE", "gleam")
 OPENAI_LIVE_AUDIO_RATE: int = int(os.getenv("OPENAI_LIVE_AUDIO_RATE", "24000"))
 
-# ── ElevenLabs test engine (web/eleven.html) ──────────────────────────────────
-# Side-by-side test: Realtime hears and answers in text, ElevenLabs speaks it. Off without a key.
+# ── ElevenLabs voice for the Realtime engine (web page) ───────────────────────
+# «Голос від: ElevenLabs»: Realtime answers in text, ElevenLabs speaks it. Off without a key.
 ELEVENLABS_API_KEY: str = os.getenv("ELEVENLABS_API_KEY", "").strip()
 # Voice used until the page picks one; empty = the first voice of the account's library.
 ELEVENLABS_VOICE_ID: str = os.getenv("ELEVENLABS_VOICE_ID", "").strip()

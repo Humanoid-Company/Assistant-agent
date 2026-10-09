@@ -46,7 +46,7 @@
 | `GOOGLE_OAUTH_WEB_CLIENT_SECRET` | з кроку 1 |
 | `ACCESS_CODE` | пароль для команди. **Задайте обов'язково:** без нього будь-хто з посиланням витрачатиме ваш баланс OpenAI |
 | `WEB_SEARCH_API_KEY` | ключ Tavily (необов'язково) |
-| `ELEVENLABS_API_KEY` | ключ ElevenLabs для тестової сторінки `/eleven` (необов'язково; без нього вона вимкнена). `ELEVENLABS_VOICE_ID`, `ELEVENLABS_MODEL` — голос і модель за замовчуванням |
+| `ELEVENLABS_API_KEY` | ключ ElevenLabs для голосу в режимі Realtime (необов'язково; без нього доступний лише голос OpenAI). `ELEVENLABS_VOICE_ID`, `ELEVENLABS_MODEL` — голос і модель за замовчуванням |
 
 3. Перевірка: `https://<ваш-сервіс>.onrender.com/healthz` → `{"ok":true}`.
 

@@ -1,7 +1,7 @@
 """Short conversation prompt for gpt-live-1 (voice layer only)."""
 from __future__ import annotations
 
-from voice.options import VOICE_PERSONAS
+from voice.options import REALTIME_PERSONAS, VOICE_PERSONAS
 
 _LIVE_PROMPT_STYLE: str = (
     "Role: You are Єва, a personal voice assistant that helps with Google Calendar, Gmail, notes "
@@ -305,29 +305,61 @@ _ELEVEN_PROMPT_DELIVERY: str = (
     "\n"
 )
 
-_ELEVEN_NOTE: str = (
-    "\nThis mode: you are a text model whose replies are voiced by ElevenLabs. You call the tools "
-    "yourself — wherever this prompt says «delegate to the backend», call the matching tool. The "
+# The Realtime engine: no built-in delegation, so the Google work goes through one tool that runs
+# the same Responses backend as Live (server/realtime_engine.py).
+_REALTIME_NOTE: str = (
+    "\nThis app runs you on the Realtime engine. Calendar, Gmail, notes and the Google account: "
+    "call backend_task with the user's request in full — their own words plus the details from the "
+    "conversation (which event, which email, names, dates) and, for a yes/no you asked, their "
+    "answer. It does the work and tells you what to say; before calling it say one very short "
+    "acknowledgement («Зараз гляну.»). Never invent its results. Web search: call web_search "
+    "yourself. Wherever this prompt says «delegate to the backend», that is what it means. The "
     "voice and its settings are chosen on the page in this mode: if asked to change the voice, "
     "speed or manner, say briefly that it is in the settings on the page (this overrides the "
     "voice-change rules above).\n"
-    "\nTool rules:\n"
 )
+_TEXT_OUTPUT_NOTE: str = "Your replies are text that ElevenLabs voices: write them for speech, as above.\n"
 
 
-def build_eleven_prompt(
-    *, language_name: str, assistant_name: str | None, today: str, feminine: bool, tool_rules: str
+def build_realtime_prompt(
+    *,
+    language_name: str,
+    assistant_name: str | None,
+    today: str,
+    voice: str | None = None,
+    feminine: bool = True,
+    text_output: bool = False,
+    delivery: str = "",
+    variant: str = "v2",
+    history: str = "",
 ) -> str:
-    """Instructions for the Realtime text model of the ElevenLabs test page."""
-    if feminine:
-        gender = "You are a woman: speak about yourself in the feminine («я зрозуміла», «я записала»)."
+    """Instructions for the Realtime engine: its own voice (an OpenAI preset) or text for ElevenLabs.
+    No listening backchannels (Realtime answers after the turn). history: the conversation so far —
+    in the instructions, so a greeting sent right after the call opens already knows it."""
+    if text_output:
+        style = _ELEVEN_PROMPT_DELIVERY
     else:
-        gender = "You are a man: speak about yourself in the masculine («я зрозумів», «я записав»)."
-    prompt = _LIVE_PROMPT_STYLE + _ELEVEN_PROMPT_DELIVERY + _LIVE_PROMPT_HEAD + _LIVE_PROMPT_TAIL
-    prompt += _ELEVEN_NOTE + tool_rules + "\n\n" + gender
+        style = _LIVE_PROMPT_DELIVERY if variant == "v1" else _LIVE_PROMPT_DELIVERY_V2
+    persona = None if text_output else REALTIME_PERSONAS.get(voice or "")
+    if persona:
+        who = persona.instructions()
+    elif feminine:
+        who = "You are a woman: speak about yourself in the feminine («я зрозуміла», «я записала»)."
+    else:
+        who = "You are a man: speak about yourself in the masculine («я зрозумів», «я записав»)."
+    prompt = _LIVE_PROMPT_STYLE + style + who + "\n\n" + _LIVE_PROMPT_HEAD + _LIVE_PROMPT_TAIL + _REALTIME_NOTE
+    if text_output:
+        prompt += _TEXT_OUTPUT_NOTE
     prompt += f" Today is {today}. Speak exclusively in {language_name}."
+    if delivery:
+        prompt += f" {delivery}"
     if assistant_name and assistant_name != "Єва":
         prompt += f" Your name is {assistant_name}. Introduce yourself with that name."
+    if history:
+        prompt += (
+            "\n\nThe conversation so far (from earlier calls; you remember it — never repeat or retell "
+            "your past replies unless asked):\n" + history
+        )
     return prompt
 
 

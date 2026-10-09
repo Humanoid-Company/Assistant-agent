@@ -156,6 +156,57 @@ VOICE_PERSONAS: dict[str, VoicePersona] = {
     )
 }
 
+# Realtime engine voices (the web page's «Realtime» choice): Realtime has only the ten older
+# presets. Марина, Кедр and Верс are shared with Live; the rest are Realtime's own.
+REALTIME_PERSONAS: dict[str, VoicePersona] = {
+    p.voice: p
+    for p in (
+        VOICE_PERSONAS["marin"],
+        VoicePersona(
+            "coral", "Корал",
+            "Жіночий, яскравий і дружній.",
+            True,
+            "A bright, friendly woman chatting with a friend: clear voice, a smile you can hear, lively "
+            "intonation that follows what she says.",
+            _F_SAMPLES,
+        ),
+        VoicePersona(
+            "shimmer", "Шимер",
+            "Жіночий, м'який і теплий.",
+            True,
+            "A soft, warm woman talking to a friend: gentle but engaged, real interest in the person, "
+            "never a narrator's evenness.",
+            _F_SAMPLES,
+        ),
+        VOICE_PERSONAS["cedar"],
+        VOICE_PERSONAS["verse"],
+        VoicePersona(
+            "ash", "Еш",
+            "Чоловічий, чіткий і впевнений.",
+            False,
+            "A clear, confident man talking to a friend: plain words, an easy mood, intonation that "
+            "follows what he says.",
+            _M_SAMPLES,
+        ),
+        VoicePersona(
+            "ballad", "Балад",
+            "Чоловічий, м'який і виразний.",
+            False,
+            "A warm, expressive man with a soft voice, talking easily like to a friend — never "
+            "announcing or narrating.",
+            _M_SAMPLES,
+        ),
+        VoicePersona(
+            "echo", "Еко",
+            "Чоловічий, спокійний і рівний.",
+            False,
+            "A calm, friendly man talking to a friend: relaxed and natural, never stiff.",
+            _M_SAMPLES,
+        ),
+    )
+}
+REALTIME_DEFAULT_VOICE = "marin"
+
 # «Єва, зміни голос на чоловічий» — handled by the app itself: the Live model often answers
 # «Секунду» and never delegates the change. The request needs a change verb near «голос».
 VOICE_REQUEST_RE = re.compile(
