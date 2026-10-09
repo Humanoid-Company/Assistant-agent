@@ -239,7 +239,7 @@ async def create_session(
         user.speed = body.speed
     if body.style in STYLE_OPTIONS:
         user.style = body.style
-    user.prompt_variant = body.prompt if body.prompt in PROMPT_VARIANTS else "v1"
+    user.prompt_variant = body.prompt if body.prompt in PROMPT_VARIANTS else "v2"
     user.reconnect_pending = False
     if body.user_text and body.user_text.strip():
         user.conversation.add("user", body.user_text.strip()[:500])
