@@ -33,9 +33,9 @@
   if (!(volume >= 0 && volume <= 1)) volume = 1;
 
   const DEBUG = params.get("debug") === "1";
-  // Delivery prompt (prompts/live_prompt.py): v1 is the usual one, v2 the experiment. Picked in the
-  // voice card (or ?prompt=v2); a change reopens the call, as a voice change does.
-  let promptVariant = params.get("prompt") || store.get("va-prompt") || "v1";
+  // Delivery prompt (prompts/live_prompt.py): v2 is the usual one, v1 the older one. Picked in the
+  // voice card (or ?prompt=v1); a change reopens the call, as a voice change does.
+  let promptVariant = params.get("prompt") || store.get("va-prompt") || "v2";
   let pc = null;
   let channel = null;
   let sessionVoice = ""; // the voice the current call was opened with
@@ -80,7 +80,9 @@
       openMsg[role] = addLine(role, "");
     }
     lastDeltaAt[role] = now;
-    openMsg[role].textContent += delta;
+    const text = openMsg[role].textContent;
+    // Sentences can arrive glued («недочула.О, та добре»): keep a space between them.
+    openMsg[role].textContent += /[.!?…]$/.test(text) && /^[^\s.,!?…»)]/.test(delta) ? " " + delta : delta;
     $("log").scrollTop = $("log").scrollHeight;
   }
 
@@ -1481,7 +1483,7 @@
     showBgListen();
     $("voiceNow").addEventListener("change", toggleVoiceNow);
     $("pronTest").addEventListener("click", pronTest);
-    $("promptVariant").value = promptVariant === "v2" ? "v2" : "v1";
+    $("promptVariant").value = promptVariant === "v1" ? "v1" : "v2";
     $("promptVariant").addEventListener("change", changePrompt);
     showPromptInfo();
     showVoiceNow();
