@@ -44,7 +44,8 @@ def _said(conn: SimpleNamespace) -> list[str]:
 
 def test_note_names_the_work_and_never_a_result():
     first = work_progress_note(["web_search"])
-    assert "the web search is still running" in first and "Never give or guess a result" in first
+    assert "the web search is still running" in first and "Not a result" in first
+    assert "nobody is talking" not in first and "go quiet" not in first  # a choice → a literal «null»
     assert "longer than usual" in work_progress_note(["calendar_list_events"], again=True)
     assert "the task is still running" in work_progress_note([])
 

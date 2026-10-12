@@ -265,19 +265,20 @@ def work_progress_note(tools: Sequence[str], *, again: bool = False) -> str:
     )
     if again:
         line = (
-            "it is taking longer than usual: say so once, lightly, in your own words («Щось довго "
-            "думає, ще трошки.», «Ох, не поспішає. Ще секунду.»)"
+            "It is taking longer than usual: say so in one short, light line in your own words («Щось "
+            "довго думає, ще трошки.», «Ох, не поспішає. Ще секунду.»)."
         )
     else:
         line = (
-            "fill the silence the way a person does while looking something up: one very short line in "
-            "your own words («Так, щось уже знаходжу…», «Ага, дивлюсь…», «Ще секундочку, гортаю…»), not "
-            "what you said before"
+            "Say one very short line in your own words that you are on it, the way a person looking "
+            "something up does («Так, щось уже знаходжу…», «Ага, дивлюсь…», «Ще секундочку, гортаю…») — "
+            "not what you said before."
         )
+    # No «if nobody is talking» / «then go quiet»: the bridge checks the quiet itself, and with a
+    # choice GPT-Live sometimes picked silence and printed a literal «null» into the transcript.
     return (
-        f"Note, not a message from the user: {what} is still running, no result yet. If nobody is "
-        f"talking, {line}. Never give or guess a result, ask nothing and don't start it again — then "
-        "go quiet and wait for the result."
+        f"Note, not a message from the user: {what} is still running, no result yet. {line} Not a "
+        "result or a guess at one, not a question, and don't start it again."
     )
 
 
