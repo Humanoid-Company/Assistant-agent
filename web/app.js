@@ -33,8 +33,9 @@
   if (!(volume >= 0 && volume <= 1)) volume = 1;
 
   const DEBUG = params.get("debug") === "1";
-  // Delivery prompt (prompts/live_prompt.py): v2 is the usual one, v1 the older one. Picked in the
-  // voice card (or ?prompt=v1); a change reopens the call, as a voice change does.
+  // Delivery prompt (prompts/live_prompt.py): v2 is the usual one, v1 the older one, v3 is v2 plus
+  // behaving like a person. Picked in the voice card (or ?prompt=v3); a change reopens the call, as a
+  // voice change does.
   let promptVariant = params.get("prompt") || store.get("va-prompt") || "v2";
   // Engine: GPT-Live, or Realtime with its own preset voice (tts "openai") or ElevenLabs ("eleven").
   // Pick on the page (or ?engine=realtime); the same functions either way.
@@ -1944,6 +1945,8 @@
       "Може тягнути в манеру диктора.",
     v2: "Як живо говорити: наче телефонна розмова з другом — інтонація за змістом, нерівний темп, " +
       "короткі розмовні речення, людські звуки рідше.",
+    v3: "Звучить як v2, а поводиться як людина: має свою думку, цікавиться вами, спершу реагує на " +
+      "ваші новини, повертається до сказаного раніше, без «чим ще можу допомогти?».",
   };
   const showPromptInfo = () => { $("promptInfo").textContent = PROMPT_INFO[$("promptVariant").value] || ""; };
 
@@ -2034,7 +2037,7 @@
     $("voiceNow").addEventListener("change", toggleVoiceNow);
     $("cleanVoice").checked = cleanVoice;
     $("cleanVoice").addEventListener("change", toggleCleanVoice);
-    $("promptVariant").value = promptVariant === "v1" ? "v1" : "v2";
+    $("promptVariant").value = ["v1", "v3"].includes(promptVariant) ? promptVariant : "v2";
     $("promptVariant").addEventListener("change", changePrompt);
     showPromptInfo();
     showVoiceNow();

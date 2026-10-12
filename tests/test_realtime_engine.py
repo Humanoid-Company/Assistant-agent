@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 import server.app as web
-from prompts.live_prompt import LIVE_PROMPT, build_realtime_prompt
+from prompts.live_prompt import LIVE_PROMPT, build_live_prompt, build_realtime_prompt
 from server.eleven import TtsRequest, tts_payload
 from server.realtime_engine import BRAIN_TOOLS, REALTIME_TOOLS, Brain, RealtimeBridge, history_text, realtime_session
 from tools.executor import ToolExecutionContext
@@ -82,6 +82,17 @@ def test_realtime_prompt():
     assert "you are talking, not reading" not in build_realtime_prompt(voice="cedar", variant="v1", **common)
     text = build_realtime_prompt(text_output=True, feminine=True, **common)
     assert "in words" in text and "ElevenLabs" in text and "я зрозуміла" in text
+    assert "Being a person" not in spoken
+    assert "Being a person" in build_realtime_prompt(voice="cedar", variant="v3", **common)
+    assert "Being a person" in build_realtime_prompt(text_output=True, variant="v3", **common)
+
+
+def test_live_prompt_v3_adds_person_to_v2():
+    common = dict(language_name="українською", assistant_name=None, today="2026-10-09")
+    v2 = build_live_prompt(**common)
+    v3 = build_live_prompt(variant="v3", **common)
+    assert "Being a person" not in v2 and "Being a person" in v3
+    assert "you are talking, not reading" in v3  # v2's sound
 
 
 def test_realtime_session_config():
