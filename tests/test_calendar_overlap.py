@@ -110,3 +110,20 @@ def test_lookup_failure_does_not_block_creating(tmp_path):
     cal.fail_on["list"] = GoogleApiError("server_error", 500, "boom")
     preview = _create(router, "15:00")
     assert preview.status == "confirmation_required"
+
+
+def test_a_class_in_another_calendar_takes_the_slot_too(tmp_path):
+    router, cal = _router(tmp_path)
+    start = datetime.fromisoformat(f"{DAY}T12:10:00").replace(tzinfo=KYIV)
+    cal.other_calendars = [("uni@group.calendar.google.com", "IT УНІ", [{
+        "id": "bigdata",
+        "summary": "Big Data, лек.",
+        "start": {"dateTime": start.isoformat()},
+        "end": {"dateTime": (start + timedelta(minutes=80)).isoformat()},
+    }])]
+
+    preview = _create(router, "12:00", 60)
+    assert preview.status == "confirmation_required"
+    assert "«Big Data, лек.» з 12:10 до 13:30 (календар «IT УНІ», його не змінити)" in preview.message
+    overlap = preview.data["overlapping_events"][0]
+    assert overlap["event_id"] == "bigdata" and overlap["read_only"] is True

@@ -510,12 +510,13 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
     def _overlapping(
         self, start: datetime, end: datetime, *, exclude_ids: tuple[str, ...] = ()
     ) -> list[dict]:
-        """Timed events that overlap [start, end). All-day events don't block a time slot.
+        """Timed events that overlap [start, end), in every calendar switched on (a class in the
+        university timetable takes the slot too). All-day events don't block a time slot.
         A failed lookup never blocks the action — the check is a courtesy, not a gate."""
         try:
             _sub, client = self._client_for_user()
             # Look back a day so a long event that started earlier is caught too.
-            events = client.list_events(start - timedelta(days=1), end)
+            events = client.list_all_events(start - timedelta(days=1), end)
         except (OAuthError, GoogleApiError):
             logger.warning("calendar overlap check failed", exc_info=True)
             return []
@@ -534,9 +535,10 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
         parts = []
         for event in events[:3]:
             begin, finish = _timed_bounds(event)  # type: ignore[misc]
+            where = f" (календар «{event['_calendar_name']}», його не змінити)" if event.get("_calendar_name") else ""
             parts.append(
                 f"«{event.get('summary') or '(без назви)'}» з {begin.astimezone(zone):%H:%M} "
-                f"до {finish.astimezone(zone):%H:%M}"
+                f"до {finish.astimezone(zone):%H:%M}{where}"
             )
         more = f" і ще {len(events) - 3}" if len(events) > 3 else ""
         return "На цей час уже є " + ", ".join(parts) + more + "."
