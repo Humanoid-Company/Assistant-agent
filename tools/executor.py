@@ -69,6 +69,9 @@ class ToolExecutionContext:
     delegation_id: str | None = None
     task_revision: int | None = None
     user_utterances: list[str] | None = None
+    # What she said last («Поставити на дев'ятнадцять п'ятдесят?»): a time she offered and the user
+    # took («Так») counts as theirs.
+    assistant_utterances: list[str] | None = None
     extras: dict[str, Any] = field(default_factory=dict)
 
 
@@ -146,6 +149,9 @@ class ToolExecutor:
         if context.user_utterances is not None:
             parsed = dict(parsed)
             parsed["user_utterances"] = context.user_utterances
+        if context.assistant_utterances is not None:
+            parsed = dict(parsed)
+            parsed["assistant_utterances"] = context.assistant_utterances
 
         started = time.monotonic()
         logger.info(

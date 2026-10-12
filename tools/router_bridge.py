@@ -44,16 +44,21 @@ def calendar_tool_args(
     *,
     session_id: str | None = None,
     user_utterances: list[str] | None = None,
+    assistant_utterances: list[str] | None = None,
 ) -> dict:
     """Map a Realtime tool call onto CalendarAgent.
 
-    session_id and user_utterances come from the server, never from the model.
+    session_id and the utterances come from the server, never from the model.
     """
     out = _calendar_kwargs(args if isinstance(args, dict) else {})
     if session_id:
         out["session_id"] = session_id
     if user_utterances is not None:
         out["user_utterances"] = [item.strip() for item in user_utterances if isinstance(item, str) and item.strip()]
+    if assistant_utterances is not None:
+        out["assistant_utterances"] = [
+            item.strip() for item in assistant_utterances if isinstance(item, str) and item.strip()
+        ]
     return out
 
 

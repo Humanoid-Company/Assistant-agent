@@ -124,6 +124,7 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
         op_id: str | None = None,
         session_id: str | None = None,
         user_utterances: list[str] | None = None,
+        assistant_utterances: list[str] | None = None,
         user_sub: str | None = None,
         email: str | None = None,
         **_ignored: object,
@@ -199,6 +200,7 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
             op_id=op_id,
             session_id=session_id,
             user_utterances=user_utterances,
+            assistant_utterances=assistant_utterances,
         )
         data = result.data or {}
         missing = data.get("missing_fields") or []
@@ -261,6 +263,7 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
                     prepared,
                     kwargs.get("user_utterances"),
                     kwargs.get("session_id"),
+                    assistant_utterances=kwargs.get("assistant_utterances"),
                 )
                 if isinstance(grounded, AgentResult):
                     return grounded
@@ -322,9 +325,15 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
             {"op_id": op.op_id, "pending_kind": op.kind, "pending_state": op.state},
         )
 
-    def _guard_pending(self, sub: str) -> AgentResult | None:
+    def _guard_pending(self, sub: str, *, replaces: frozenset[str] = frozenset()) -> AgentResult | None:
+        """replaces: kinds of a still unanswered preview that a new request of the same sort takes
+        over — «тоді після пар» after a taken slot is a new plan, not a yes/no, and answering it
+        with the old question again and again («система підставила тринадцяту») went nowhere."""
         op = self._pending.get(sub)
         if op is None:
+            return None
+        if op.state == "pending" and op.kind in replaces and self._pending.mark_cancelled(sub):
+            logger.info("calendar pending superseded kind=%s op_id=%s", op.kind, op.op_id)
             return None
         if op.state == "pending":
             return AgentResult(

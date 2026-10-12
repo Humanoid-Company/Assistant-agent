@@ -71,6 +71,9 @@ class SidebandToolBridge:
         self._responses = DelegatedResponseTracker()
         self._user_turns: list[str] = []
         self._input_buf = ""
+        # Her last lines, for a time she offered and the user took («Так»).
+        self._assistant_turns: list[str] = []
+        self._output_buf = ""
         self.end_requested = False
         self._conversation = conversation
         # Set by change_voice: close the session right away (no spoken confirmation) so the page
@@ -189,6 +192,9 @@ class SidebandToolBridge:
             delta = _attr(event, "delta") or ""
             self._input_buf += delta
             self._last_input_at = asyncio.get_running_loop().time()
+            if self._output_buf.strip():  # the user speaks: her line is over
+                self._assistant_turns = (self._assistant_turns + [self._output_buf.strip()])[-5:]
+                self._output_buf = ""
             if self._conversation is not None:
                 self._conversation.add("user", delta)
             if self._on_voice_request is not None and VOICE_REQUEST_RE.search(self._input_buf):
@@ -198,6 +204,7 @@ class SidebandToolBridge:
             return
         if etype == "session.output_transcript.delta":
             delta = _attr(event, "delta") or ""
+            self._output_buf += delta
             self._last_output_at = asyncio.get_running_loop().time()
             if self._conversation is not None:
                 self._conversation.add("assistant", delta)
@@ -307,6 +314,8 @@ class SidebandToolBridge:
             delegation_id=delegation_id,
             user_utterances=list(self._user_turns) + ([self._input_buf.strip()] if self._input_buf.strip() else [])
             or None,
+            assistant_utterances=(self._assistant_turns + [self._output_buf.strip()] if self._output_buf.strip()
+                                  else list(self._assistant_turns))[-3:] or None,
         )
         try:
             result = await self._executor.execute(name, arguments, ctx)

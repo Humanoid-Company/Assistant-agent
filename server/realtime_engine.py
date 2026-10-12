@@ -218,6 +218,7 @@ class RealtimeBridge:
         self._closed = asyncio.Event()
         self._tool_tasks: set[asyncio.Task] = set()
         self._user_turns: list[str] = []
+        self._assistant_turns: list[str] = []  # her last lines: a time she offered and they took
         # The page's «is this addressed to you?» checks (out of band): not part of the conversation.
         self._side_responses: set[str] = set()
         self.end_requested = False
@@ -309,6 +310,7 @@ class RealtimeBridge:
             if text:
                 self._conversation.add("assistant", text)
                 self._conversation.end_turn()
+                self._assistant_turns = (self._assistant_turns + [text])[-5:]
             return
         if etype == "error":
             logger.error("realtime.error call_id=%s detail=%s", self.session_id, _attr(event, "error") or event)
@@ -329,7 +331,10 @@ class RealtimeBridge:
 
     async def _run_tools(self, calls: list[Any]) -> None:
         ctx = ToolExecutionContext(
-            session_id=self.session_id, delegation_id=None, user_utterances=list(self._user_turns) or None
+            session_id=self.session_id,
+            delegation_id=None,
+            user_utterances=list(self._user_turns) or None,
+            assistant_utterances=self._assistant_turns[-3:] or None,
         )
         outputs = await asyncio.gather(*(self._run_tool(c, ctx) for c in calls))
         if not self.is_open:

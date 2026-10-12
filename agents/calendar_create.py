@@ -35,6 +35,18 @@ from integrations.google_calendar import (
     speak_date,
 )
 
+# A short yes to what she offered — not a new request («так, але о восьмій» carries its own time).
+_AGREEMENT = re.compile(
+    r"^\W*(так|та|да|ага|угу|ок|окей|добре|гаразд|давай|давайте|можна|звісно|підходить|годиться|"
+    r"згоден|згодна|став|ставь|постав|супер|ідеально)\b[\w\s,.!'’-]{0,24}$",
+    re.IGNORECASE,
+)
+
+
+def _is_agreement(text: str) -> bool:
+    folded = (text or "").strip()
+    return bool(_AGREEMENT.match(folded)) and not re.search(r"\b(ні|не|але)\b", folded, re.IGNORECASE)
+
 
 class CalendarCreateMixin:
     def _prepare_create(
@@ -178,8 +190,12 @@ class CalendarCreateMixin:
         prepared: dict,
         utterances: list[str] | None,
         session_id: str | None,
+        *,
+        assistant_utterances: list[str] | None = None,
     ) -> AgentResult | dict:
-        """Merge multi-turn slots; reject invented titles/schedules; keep date/time across title fixes."""
+        """Merge multi-turn slots; reject invented titles/schedules; keep date/time across title fixes.
+        A date or time she offered in her last lines («Поставити на дев'ятнадцять п'ятдесят?») counts
+        as said by the user once they agree («Так», «Та, давайте»)."""
         if utterances is None:
             return prepared
         texts = [item.strip() for item in utterances if item and item.strip()]
@@ -204,6 +220,13 @@ class CalendarCreateMixin:
         # Persist schedule the user already said — even while title is still missing.
         spoken_dates = self._dates_in(blob)
         spoken_times = _mentioned_times(blob)
+        offered_dates: set[str] = set()
+        offered_times: set[str] = set()
+        if assistant_utterances and _is_agreement(latest):
+            offered = " ".join(assistant_utterances[-2:])
+            offered_dates, offered_times = self._dates_in(offered), _mentioned_times(offered)
+            spoken_dates |= offered_dates
+            spoken_times |= offered_times
         prepared_date = prepared.get("date")
         prepared_time = prepared.get("time")
         prepared_title = (prepared.get("title") or "").strip() or None
@@ -219,7 +242,9 @@ class CalendarCreateMixin:
         if prepared_time and prepared_time in spoken_times:
             draft.time = prepared_time
             draft.confirmed_fields.add("time")
-        elif not draft.time and spoken_times:
+        elif not draft.time and spoken_times and not prepared_time:
+            # Never in place of a time the model did pass: that silently turned «19:50» back into the
+            # «13» said earlier. A time nobody said is asked for instead.
             # Prefer 12h+ evening interpretation when both 08:00 and 20:00 appear.
             evening = sorted(t for t in spoken_times if int(t.split(":")[0]) >= 12)
             draft.time = evening[0] if evening else sorted(spoken_times)[0]
@@ -325,8 +350,8 @@ class CalendarCreateMixin:
                 )
 
         # Merge schedule: draft wins unless the latest utterance explicitly changes it.
-        latest_dates = self._dates_in(latest)
-        latest_times = _mentioned_times(latest)
+        latest_dates = self._dates_in(latest) | offered_dates
+        latest_times = _mentioned_times(latest) | offered_times
         date = prepared_date or draft.date
         clock = prepared_time or draft.time
         if draft.date and date != draft.date and date not in latest_dates:
@@ -390,7 +415,7 @@ class CalendarCreateMixin:
         description: str | None = None,
     ) -> AgentResult:
         sub = self._accounts.require_active_sub()
-        busy = self._guard_pending(sub)
+        busy = self._guard_pending(sub, replaces=frozenset({"calendar_create"}))
         if busy:
             return busy
         missing = [

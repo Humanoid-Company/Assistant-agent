@@ -48,11 +48,10 @@ class CalendarToolWrappers:
         kwargs["action"] = action
         if session_id:
             kwargs["session_id"] = session_id
-        utterances = args.get("user_utterances")
-        if isinstance(utterances, list):
-            kwargs["user_utterances"] = [
-                item.strip() for item in utterances if isinstance(item, str) and item.strip()
-            ]
+        for key in ("user_utterances", "assistant_utterances"):
+            utterances = args.get(key)
+            if isinstance(utterances, list):
+                kwargs[key] = [item.strip() for item in utterances if isinstance(item, str) and item.strip()]
         return self._calendar_action(**kwargs)
 
     def list_events(self, args: dict[str, Any], *, session_id: str | None) -> AgentResult:

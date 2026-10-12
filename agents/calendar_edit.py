@@ -52,7 +52,7 @@ class CalendarEditMixin:
         session_id: str | None,
     ) -> AgentResult:
         sub = self._accounts.require_active_sub()
-        busy = self._guard_pending(sub)
+        busy = self._guard_pending(sub, replaces=frozenset({"calendar_cancel"}))
         if busy:
             return busy
         now = datetime.now(ZoneInfo(self._timezone))
@@ -141,7 +141,7 @@ class CalendarEditMixin:
         session_id: str | None,
     ) -> AgentResult:
         sub = self._accounts.require_active_sub()
-        busy = self._guard_pending(sub)
+        busy = self._guard_pending(sub, replaces=frozenset({"calendar_reschedule", "calendar_update"}))
         if busy:
             return busy
         now = datetime.now(ZoneInfo(self._timezone))
