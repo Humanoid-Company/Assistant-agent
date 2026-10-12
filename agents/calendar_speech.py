@@ -131,6 +131,13 @@ _HOUR_WORDS: dict[str, int] = {
 _WORD_TOKEN_RE = re.compile(r"[a-zа-яіїєґё'ʼ’`-]+", re.IGNORECASE)
 _PERIOD_RE = re.compile(r"^(вечора|вечір|вечера|вечером|дня|днем|ранку|зранку|ночі|ночью)$")
 _ZERO_WORDS = ("нуль", "ноль", "нуль-нуль", "ноль-ноль")
+# Minutes said after the hour: «дев'ятнадцять п'ятдесят», «о сьомій тридцять п'ять». Whole words
+# only — as a stem «п'ятдесят» is «п'ята» (it was heard as 05:00 / 17:00).
+_MINUTE_TENS = {"десять": 10, "п'ятнадцять": 15, "двадцять": 20, "тридцять": 30, "сорок": 40, "п'ятдесят": 50}
+_MINUTE_FIVE = "п'ять"
+# Before the hour: «пів на восьму» is 7:30 (not 8:00), «чверть на третю» 2:15, «без чверті три» 2:45.
+_BEFORE_HOUR = {("пів", "на"): 30, ("чверть", "на"): 15, ("без", "чверті"): 45, ("за", "чверть"): 45}
+_HALF_DIGITS_RE = re.compile(r"\b(пів|чверть)\s+на\s+(\d{1,2})\b", re.IGNORECASE)
 _SPOKEN_HHMM_RE = re.compile(
     r"\b(\d{1,2})\s+(?:нуль|ноль|00)\s+(?:нуль|ноль|00)\b",
     re.IGNORECASE,
@@ -233,11 +240,24 @@ def _mentioned_times(text: str) -> set[str]:
         hour = int(match.group(1))
         if hour <= 23:
             found.add(f"{hour:02d}:00")
-    tokens = _WORD_TOKEN_RE.findall(text.casefold())
+    for match in _HALF_DIGITS_RE.finditer(text):
+        minute = 30 if match.group(1).casefold() == "пів" else 15
+        _add_clock(found, int(match.group(2)) - 1 or 12, minute, None)
+    folded = text.casefold().replace("ʼ", "'").replace("’", "'").replace("`", "'")
+    tokens = _WORD_TOKEN_RE.findall(folded)
     consumed = 0
     for i, token in enumerate(tokens):
         if i < consumed or token in _ZERO_WORDS:
             continue  # «п'ятнадцята нуль нуль» — minutes, not midnight
+        before = _BEFORE_HOUR.get((token, tokens[i + 1] if i + 1 < len(tokens) else ""))
+        if before is not None and i + 2 < len(tokens):
+            target = _lookup_hour_word(tokens[i + 2])
+            if target is not None:
+                j = i + 3
+                period = tokens[j] if j < len(tokens) and _PERIOD_RE.match(tokens[j]) else None
+                _add_clock(found, (target - 1) % 12 or 12, before, period)
+                consumed = j + (period is not None)
+                continue
         hour = _lookup_hour_word(token)
         if hour is None:
             continue
@@ -246,17 +266,29 @@ def _mentioned_times(text: str) -> set[str]:
             unit = _lookup_hour_word(tokens[j])
             if unit is not None and 1 <= unit <= 3:  # «двадцять першій»
                 hour, j = 20 + unit, j + 1
-                consumed = j
         while j < len(tokens) and (tokens[j] in _ZERO_WORDS or tokens[j].startswith(("годин", "час"))):
             j += 1
+        minute = 0
+        if j < len(tokens) and tokens[j] in _MINUTE_TENS:
+            minute = _MINUTE_TENS[tokens[j]]
+            j += 1
+            if minute >= 20 and j < len(tokens) and tokens[j] == _MINUTE_FIVE:
+                minute += 5
+                j += 1
         period = tokens[j] if j < len(tokens) and _PERIOD_RE.match(tokens[j]) else None
-        hour = _hour_period(hour, period)
-        if hour > 23:
-            continue
-        found.add(f"{hour:02d}:00")
-        if period is None and 1 <= hour <= 11:
-            found.add(f"{hour + 12:02d}:00")
+        consumed = j
+        _add_clock(found, hour, minute, period)
     return found
+
+
+def _add_clock(found: set[str], hour: int, minute: int, period: str | None) -> None:
+    """A spoken hour without «ранку»/«вечора» may be either half of the day: both are kept."""
+    hour = _hour_period(hour, period)
+    if hour > 23:
+        return
+    found.add(f"{hour:02d}:{minute:02d}")
+    if period is None and 1 <= hour <= 11:
+        found.add(f"{hour + 12:02d}:{minute:02d}")
 
 
 # Spoken dates: «13 жовтня», «тринадцяте жовтня дві тисячі двадцять шостого року»,
