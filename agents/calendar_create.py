@@ -11,6 +11,7 @@ from agents.calendar_speech import (
     _is_acknowledgement,
     _mentioned_dates,
     _mentioned_times,
+    _reminder_phrase,
 )
 from agents.calendar_validation import (
     _PRIMARY,
@@ -413,6 +414,7 @@ class CalendarCreateMixin:
         with_meet: bool = False,
         session_id: str | None = None,
         description: str | None = None,
+        reminder_minutes: int | None = None,
     ) -> AgentResult:
         sub = self._accounts.require_active_sub()
         busy = self._guard_pending(sub, replaces=frozenset({"calendar_create"}))
@@ -453,18 +455,21 @@ class CalendarCreateMixin:
 
         idempotency_key = str(uuid.uuid4())
         when = f"{speak_date(date, now=self._now())} о {speak_clock(time)}"
+        parts = (["Google Meet"] if with_meet else []) + (
+            [f"нагадуванням {_reminder_phrase(reminder_minutes)}"] if reminder_minutes is not None else []
+        )
+        extras = " з " + " і ".join(parts) if parts else ""
         overlaps = self._overlapping(start, end)
         if overlaps:
             # The user decides: keep both, or pick another time. Never move the other event.
             summary = (
                 f"{self._overlap_phrase(overlaps)} Все одно створити «{title}» на {when}"
-                f"{' з Google Meet' if with_meet else ''}, чи обрати інший час? "
+                f"{extras}, чи обрати інший час? "
                 "Наявну подію не змінюю."
             )
         else:
             summary = (
-                f"Створити подію «{title}» на {when}"
-                f"{' з Google Meet' if with_meet else ''}. Підтвердити?"
+                f"Створити подію «{title}» на {when}{extras}. Підтвердити?"
             )
         op = self._pending.put(
             sub,
@@ -482,6 +487,7 @@ class CalendarCreateMixin:
                 "idempotency_key": idempotency_key,
                 "calendar_id": _PRIMARY,
                 "description": _blank(description),
+                "reminder_minutes": reminder_minutes,
             },
             session_id=session_id,
         )

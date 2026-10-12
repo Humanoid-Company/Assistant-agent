@@ -55,6 +55,7 @@ _CALENDAR_STRING_FIELDS = (
     "confirmation",
     "op_id",
     "session_id",
+    "calendar",
 )
 
 
@@ -77,6 +78,9 @@ def calendar_call_problem(kwargs: dict) -> AgentResult | None:
         whole = isinstance(minutes, int) and not isinstance(minutes, bool)
         if not digit and not whole:
             invalid.append("duration_minutes")
+    reminder = kwargs.get("reminder_minutes")
+    if reminder is not None and (isinstance(reminder, bool) or not isinstance(reminder, int) or not 0 <= reminder <= 40320):
+        invalid.append("reminder_minutes")  # Google allows up to four weeks
     if "with_meet" in kwargs and kwargs["with_meet"] is not None and not isinstance(kwargs["with_meet"], bool):
         invalid.append("with_meet")
     utterances = kwargs.get("user_utterances")

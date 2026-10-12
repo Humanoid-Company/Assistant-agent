@@ -18,6 +18,8 @@ from agents.calendar_speech import (
     _day_phrase,
     _duration_phrase,
     _is_deictic,
+    _reminder_phrase,
+    reminder_body,
 )
 from agents.calendar_validation import (
     _PRIMARY,
@@ -139,6 +141,7 @@ class CalendarEditMixin:
         duration_minutes: int | None,
         recurrence_scope: str | None,
         session_id: str | None,
+        reminder_minutes: int | None = None,
     ) -> AgentResult:
         sub = self._accounts.require_active_sub()
         busy = self._guard_pending(sub, replaces=frozenset({"calendar_reschedule", "calendar_update"}))
@@ -176,6 +179,7 @@ class CalendarEditMixin:
                 (new_summary or "").strip(),
                 new_description is not None and str(new_description).strip(),
                 duration_minutes is not None,
+                reminder_minutes is not None,  # «нагадування до зустрічі завтра о 11:50»: date/time find it
             )
         )
         search_date = date
@@ -244,6 +248,7 @@ class CalendarEditMixin:
             new_summary=(new_summary or "").strip() or None,
             new_description=new_description.strip() if isinstance(new_description, str) else new_description,
             now=now,
+            reminder_minutes=reminder_minutes,
         )
         if isinstance(planned, AgentResult):
             return planned
@@ -348,6 +353,7 @@ class CalendarEditMixin:
         new_summary: str | None,
         new_description: str | None,
         now: datetime,
+        reminder_minutes: int | None = None,
     ) -> AgentResult | dict:
         bounds = _timed_bounds(event)
         wants_time = any((dest_date, dest_time, new_end, duration_minutes is not None))
@@ -397,8 +403,10 @@ class CalendarEditMixin:
             if not str(new_description).strip():
                 return AgentResult("needs_more_info", "Який опис додати до події?")
             patch["description"] = str(new_description).strip()
+        if reminder_minutes is not None:
+            patch["reminders"] = reminder_body(reminder_minutes)
         if not patch:
-            return AgentResult("needs_more_info", "Що саме змінити: час, назву, тривалість чи опис?")
+            return AgentResult("needs_more_info", "Що саме змінити: час, назву, тривалість, опис чи нагадування?")
 
         name = current_summary or "(без назви)"
         spoken: list[str] = []
@@ -427,6 +435,9 @@ class CalendarEditMixin:
         if "description" in patch:
             spoken.append(f"Додати опис до «{patch.get('summary') or name}»: {patch['description']}")
             done.append(f"Оновив опис події «{patch.get('summary') or name}».")
+        if "reminders" in patch:
+            spoken.append(f"Поставити нагадування {_reminder_phrase(reminder_minutes)} до «{name}»")
+            done.append(f"Нагадування до «{name}» — {_reminder_phrase(reminder_minutes)}.")
         kind = "calendar_reschedule" if "start" in patch else "calendar_update"
         return {
             "patch": patch,
@@ -536,6 +547,7 @@ class CalendarEditMixin:
         horizon_days: int,
         window: tuple[datetime, datetime] | None = None,
         all_calendars: bool = False,
+        calendar_ids: frozenset[str] | None = None,
     ) -> list[dict]:
         """all_calendars: read the other calendars too (listing and search only — changes stay in
         the primary one)."""
@@ -552,8 +564,10 @@ class CalendarEditMixin:
         else:
             time_min = now.replace(hour=0, minute=0, second=0, microsecond=0)
             time_max = now + timedelta(days=horizon_days)
-        lister = client.list_all_events if all_calendars else client.list_events
-        events = lister(time_min, time_max, query=title or None)
+        if all_calendars:
+            events = client.list_all_events(time_min, time_max, query=title or None, calendar_ids=calendar_ids)
+        else:
+            events = client.list_events(time_min, time_max, query=title or None)
         if title:
             tokens = [part.casefold() for part in title.split() if len(part) > 1]
             events = [

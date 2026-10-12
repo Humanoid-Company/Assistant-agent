@@ -9,6 +9,7 @@ from agents.calendar_events import (
     _patch_applied,
     _uncertain,
 )
+from agents.calendar_speech import _reminder_phrase, reminder_body
 from agents.calendar_validation import (
     _AMBIGUOUS_MSG,
     _NO,
@@ -237,6 +238,8 @@ class CalendarExecutionMixin:
         }
         if payload.get("description"):
             body["description"] = payload["description"]
+        if payload.get("reminder_minutes") is not None:
+            body["reminders"] = reminder_body(payload["reminder_minutes"])
         idem = payload.get("idempotency_key")
         if idem:
             body["iCalUID"] = f"{idem}@voice-agent.local"
@@ -254,6 +257,8 @@ class CalendarExecutionMixin:
         )
         if meet:
             msg += " Додав посилання Google Meet."
+        if payload.get("reminder_minutes") is not None:
+            msg += f" Нагадування — {_reminder_phrase(payload['reminder_minutes'])}."
         return AgentResult(
             "success",
             msg,

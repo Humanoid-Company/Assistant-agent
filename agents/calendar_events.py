@@ -76,6 +76,12 @@ def _patch_applied(fresh: dict, patch: dict) -> bool:
         got = (fresh.get("end") or {}).get("dateTime")
         if got != (patch["end"] or {}).get("dateTime"):
             return False
+    if "reminders" in patch:
+        def minutes(reminders: dict | None) -> set:
+            return {item.get("minutes") for item in (reminders or {}).get("overrides") or []}
+
+        if minutes(fresh.get("reminders")) != minutes(patch["reminders"]):
+            return False
     return True
 
 

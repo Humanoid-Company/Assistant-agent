@@ -25,6 +25,8 @@ _CALENDAR_FIELDS = (
     "with_meet",
     "confirmation",
     "op_id",
+    "reminder_minutes",
+    "calendar",
 )
 
 

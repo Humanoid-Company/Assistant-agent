@@ -512,6 +512,26 @@ def _is_deictic(text: str | None) -> bool:
     return _DEICTIC_RE.match(cleaned) is not None
 
 
+def _reminder_phrase(minutes: int) -> str:
+    """«за годину», «за 2 години», «за 30 хвилин», «за день», «на початку»."""
+    if minutes <= 0:
+        return "на початку"
+    if minutes % 1440 == 0:
+        days = minutes // 1440
+        return "за день" if days == 1 else f"за {days} {'дні' if 2 <= days <= 4 else 'днів'}"
+    if minutes % 60 == 0:
+        hours = minutes // 60
+        return "за годину" if hours == 1 else f"за {hours} {'години' if 2 <= hours <= 4 else 'годин'}"
+    if minutes == 90:
+        return "за півтори години"
+    return f"за {minutes} хвилин"
+
+
+def reminder_body(minutes: int) -> dict:
+    """A phone notification instead of the calendar's default reminders."""
+    return {"useDefault": False, "overrides": [{"method": "popup", "minutes": int(minutes)}]}
+
+
 def _duration_phrase(minutes: int) -> str:
     if minutes <= 0:
         return f"{minutes} хвилин"

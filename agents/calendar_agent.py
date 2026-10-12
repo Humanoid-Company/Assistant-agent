@@ -6,6 +6,8 @@ calendar_speech / calendar_events / calendar_validation."""
 from __future__ import annotations
 
 import logging
+import re
+import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -55,6 +57,30 @@ logger = logging.getLogger(__name__)
 # (a university week is thirty classes).
 _SPOKEN_EVENTS = 8
 _PUBLIC_EVENTS = 20
+# A choice of calendars («лише пари») holds this long; then a listing asks again.
+_CHOICE_TTL_S = 30 * 60
+_ALL_WORDS = ("all", "усі", "всі", "усіх", "всіх", "все", "усе", "обидва", "обидві", "будь")
+_PRIMARY_STEMS = ("primary", "основн", "особист", "персонал", "мій", "мої", "мого", "моєму", "свій", "власн")
+
+
+def _match_calendars(choice: str, calendars: list[dict]) -> frozenset[str] | None | bool:
+    """«в усіх» → None (all), «особистий» → the primary one, «уні»/«університетський» → the calendar
+    whose name has a word starting the same way. False — nothing matched."""
+    words = [w for w in re.findall(r"[\w'’]+", choice.casefold()) if len(w) >= 3 or w in ("всі", "усі", "мій")]
+    if any(w.startswith(_ALL_WORDS) for w in words):
+        return None
+    if any(w.startswith(_PRIMARY_STEMS) for w in words):
+        return frozenset({"primary"})
+    found = set()
+    for calendar in calendars:
+        if calendar["primary"]:
+            continue
+        name_words = [w for w in re.findall(r"[\w'’]+", calendar["name"].casefold()) if len(w) >= 3]
+        if choice.casefold().strip() == calendar["name"].casefold().strip() or any(
+            w.startswith(n) or n.startswith(w) for w in words for n in name_words
+        ):
+            found.add(calendar["id"])
+    return frozenset(found) if found else False
 
 
 class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMixin):
@@ -74,6 +100,9 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
         self._now_source = clock
         self._selected: dict[tuple[str, str], dict] = {}
         self._drafts = CreateDraftStore()
+        # Which calendars a listing reads, as the user chose («в усіх», «лише пари»): sub → (ids or
+        # None for all, when it stops counting). Live sessions end at every pause, so not per session.
+        self._calendar_choice: dict[str, tuple[frozenset[str] | None, float]] = {}
 
     def clear_conversation_state(self, user_sub: str | None = None) -> None:
         """Drop unfinished create slots (account switch / disconnect / lock)."""
@@ -125,6 +154,8 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
         session_id: str | None = None,
         user_utterances: list[str] | None = None,
         assistant_utterances: list[str] | None = None,
+        reminder_minutes: int | None = None,
+        calendar: str | None = None,
         user_sub: str | None = None,
         email: str | None = None,
         **_ignored: object,
@@ -152,6 +183,8 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
                 "op_id": op_id,
                 "session_id": session_id,
                 "user_utterances": user_utterances,
+                "reminder_minutes": reminder_minutes,
+                "calendar": calendar,
             }
         )
         if problem is not None:
@@ -176,6 +209,8 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
                 ("recurrence_scope", recurrence_scope),
                 ("confirmation", confirmation),
                 ("op_id", op_id),
+                ("reminder_minutes", reminder_minutes),
+                ("calendar", calendar),
             )
             if value not in (None, "")
         ]
@@ -201,6 +236,8 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
             session_id=session_id,
             user_utterances=user_utterances,
             assistant_utterances=assistant_utterances,
+            reminder_minutes=reminder_minutes,
+            calendar=calendar,
         )
         data = result.data or {}
         missing = data.get("missing_fields") or []
@@ -235,7 +272,8 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
         try:
             if action in ("list", "view", "agenda"):
                 return self.list_upcoming(
-                    query=kwargs["query"], session_id=kwargs["session_id"], date=kwargs["date"]
+                    query=kwargs["query"], session_id=kwargs["session_id"], date=kwargs["date"],
+                    calendar=kwargs["calendar"],
                 )
             if action == "search":
                 return self.search(
@@ -243,6 +281,7 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
                     date=kwargs["date"],
                     time=kwargs["time"],
                     session_id=kwargs["session_id"],
+                    calendar=kwargs["calendar"],
                 )
             if action == "create":
                 prepared = self._prepare_create(
@@ -271,6 +310,7 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
                     **grounded,
                     with_meet=kwargs["with_meet"],
                     session_id=kwargs["session_id"],
+                    reminder_minutes=kwargs["reminder_minutes"],
                 )
             if action in ("cancel", "delete"):
                 return self.propose_cancel(
@@ -300,6 +340,7 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
                     duration_minutes=kwargs["duration_minutes"],
                     recurrence_scope=kwargs["recurrence_scope"],
                     session_id=kwargs["session_id"],
+                    reminder_minutes=kwargs["reminder_minutes"],
                 )
             return AgentResult(
                 "needs_more_info",
@@ -422,8 +463,12 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
         days: int = 7,
         session_id: str | None = None,
         date: str | None = None,
+        calendar: str | None = None,
     ) -> AgentResult:
         sub, client = self._client_for_user()
+        scope = self._calendar_scope(sub, client, calendar, ask=True)
+        if isinstance(scope, AgentResult):
+            return scope
         now = self._now()
         title, parsed_date, parsed_time, window = self._read_query(query, now)
         day = self._day_of(date, now) or parsed_date
@@ -435,6 +480,7 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
             horizon_days=days,
             window=None if day else window,
             all_calendars=True,
+            calendar_ids=scope,
         )
         events = self._collect(client, title=title, **span)
         if title and not events and (day or window):
@@ -454,10 +500,14 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
         date: str | None = None,
         time: str | None = None,
         session_id: str | None = None,
+        calendar: str | None = None,
     ) -> AgentResult:
         if not (query or "").strip() and not date and not time:
             return AgentResult("needs_more_info", "Що саме шукати в календарі?")
         sub, client = self._client_for_user()
+        scope = self._calendar_scope(sub, client, calendar, ask=False)  # a search looks everywhere
+        if isinstance(scope, AgentResult):
+            return scope
         now = self._now()
         title, parsed_date, parsed_time, window = self._read_query(query, now)
         day = self._day_of(date, now) or parsed_date
@@ -471,8 +521,43 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
             horizon_days=30,
             window=None if day else window,
             all_calendars=True,
+            calendar_ids=scope,
         )
         return self._events_result(sub, session_id, events, search_mode=True)
+
+    def _calendar_scope(
+        self, sub: str, client: CalendarClient, calendar: str | None, *, ask: bool
+    ) -> frozenset[str] | None | AgentResult:
+        """Which calendars to read: None — all. With more than one and no choice yet, a listing asks
+        («в усіх чи в якомусь одному?»); the answer counts for _CHOICE_TTL_S."""
+        choice = _blank(calendar)
+        if choice is None:
+            remembered = self._calendar_choice.get(sub)
+            if remembered and remembered[1] > time.monotonic():
+                return remembered[0]
+            if not ask:
+                return None
+        calendars = client.calendars()
+        if len(calendars) <= 1:
+            return None
+        names = ", ".join(c["name"] if c["primary"] else f"«{c['name']}»" for c in calendars)
+        if choice is None:
+            return AgentResult(
+                "needs_more_info",
+                f"Подивитись в усіх календарях чи в якомусь одному? Є: {names}.",
+                {"missing_fields": ["calendar"], "reason_code": "calendar_choice",
+                 "calendars": [c["name"] for c in calendars]},
+            )
+        ids = _match_calendars(choice, calendars)
+        if ids is False:
+            return AgentResult(
+                "needs_more_info",
+                f"Не знайшла календар «{choice}». Є: {names}. Який із них?",
+                {"missing_fields": ["calendar"], "reason_code": "calendar_not_found",
+                 "calendars": [c["name"] for c in calendars]},
+            )
+        self._calendar_choice[sub] = (ids, time.monotonic() + _CHOICE_TTL_S)
+        return ids
 
     def _events_result(
         self,

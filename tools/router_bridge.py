@@ -24,6 +24,8 @@ _CALENDAR_ARG_KEYS = (
     "with_meet",
     "confirmation",
     "op_id",
+    "reminder_minutes",
+    "calendar",
 )
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Collection
 from datetime import datetime, timedelta
 from typing import Any, Protocol
 from uuid import uuid4
@@ -23,11 +24,20 @@ _LIST_FIELDS = (
 # A free/busy-only calendar has no titles to read.
 _CALENDAR_LIST_FIELDS = "items(id,summary,summaryOverride,primary,selected,hidden,accessRole)"
 _READABLE_ROLES = frozenset({"owner", "writer", "reader"})
+PRIMARY = "primary"
 
 
 class CalendarClient(Protocol):
     def list_events(self, time_min: datetime, time_max: datetime, query: str | None = None) -> list[dict]: ...
-    def list_all_events(self, time_min: datetime, time_max: datetime, query: str | None = None) -> list[dict]: ...
+    def list_all_events(
+        self,
+        time_min: datetime,
+        time_max: datetime,
+        query: str | None = None,
+        *,
+        calendar_ids: Collection[str] | None = None,
+    ) -> list[dict]: ...
+    def calendars(self) -> list[dict]: ...
     def create_event(self, body: dict, *, conference: bool = False) -> dict: ...
     def update_event(self, event_id: str, body: dict, calendar_id: str | None = None) -> dict: ...
     def delete_event(self, event_id: str, calendar_id: str | None = None) -> None: ...
@@ -39,6 +49,7 @@ class GoogleCalendarClient:
         self._credentials = credentials
         self._service = google_service("calendar", "v3", credentials)
         self._calendar_id = calendar_id
+        self._others: list[dict] | None = None  # the calendar list, read once per client
 
     def _read(self, request: Any) -> Any:
         return google_execute(request, self._credentials, read_only=True)
@@ -49,12 +60,22 @@ class GoogleCalendarClient:
     def list_events(self, time_min: datetime, time_max: datetime, query: str | None = None) -> list[dict]:
         return self._list(self._calendar_id, time_min, time_max, query)
 
-    def list_all_events(self, time_min: datetime, time_max: datetime, query: str | None = None) -> list[dict]:
+    def list_all_events(
+        self,
+        time_min: datetime,
+        time_max: datetime,
+        query: str | None = None,
+        *,
+        calendar_ids: Collection[str] | None = None,
+    ) -> list[dict]:
         """The primary calendar plus every other one switched on in Google Calendar — for reading
         only: an event from another calendar carries _calendar_id and _calendar_name. A calendar
-        that fails to load is skipped, never the whole answer."""
-        items = self.list_events(time_min, time_max, query)
+        that fails to load is skipped, never the whole answer. calendar_ids: only these («primary»
+        is the primary one); None — all."""
+        items = self.list_events(time_min, time_max, query) if calendar_ids is None or PRIMARY in calendar_ids else []
         for calendar in self._other_calendars():
+            if calendar_ids is not None and calendar["id"] not in calendar_ids:
+                continue
             try:
                 found = self._list(calendar["id"], time_min, time_max, query)
             except GoogleApiError:
@@ -65,7 +86,16 @@ class GoogleCalendarClient:
         items.sort(key=_sort_key)
         return items
 
+    def calendars(self) -> list[dict]:
+        """{id, name, primary} of every calendar it reads, the primary one first."""
+        return [{"id": PRIMARY, "name": "основний", "primary": True}] + [
+            {"id": item["id"], "name": item.get("summaryOverride") or item.get("summary") or "", "primary": False}
+            for item in self._other_calendars()
+        ]
+
     def _other_calendars(self) -> list[dict]:
+        if self._others is not None:
+            return self._others
         try:
             response = self._read(
                 self._service.calendarList().list(fields=_CALENDAR_LIST_FIELDS, maxResults=250)
@@ -73,7 +103,7 @@ class GoogleCalendarClient:
         except GoogleApiError:
             logger.warning("calendar.calendar_list failed", exc_info=True)
             return []
-        return [
+        self._others = [
             item
             for item in response.get("items", [])
             if not item.get("primary")
@@ -81,6 +111,7 @@ class GoogleCalendarClient:
             and not item.get("hidden")
             and item.get("accessRole") in _READABLE_ROLES
         ]
+        return self._others
 
     def _list(self, calendar_id: str, time_min: datetime, time_max: datetime, query: str | None) -> list[dict]:
         kwargs: dict[str, Any] = {
@@ -185,9 +216,23 @@ class FakeCalendarClient:
         items.sort(key=_sort_key)
         return items
 
-    def list_all_events(self, time_min: datetime, time_max: datetime, query: str | None = None) -> list[dict]:
-        items = self.list_events(time_min, time_max, query)
+    def calendars(self) -> list[dict]:
+        return [{"id": PRIMARY, "name": "основний", "primary": True}] + [
+            {"id": calendar_id, "name": name, "primary": False} for calendar_id, name, _events in self.other_calendars
+        ]
+
+    def list_all_events(
+        self,
+        time_min: datetime,
+        time_max: datetime,
+        query: str | None = None,
+        *,
+        calendar_ids: Collection[str] | None = None,
+    ) -> list[dict]:
+        items = self.list_events(time_min, time_max, query) if calendar_ids is None or PRIMARY in calendar_ids else []
         for calendar_id, name, events in self.other_calendars:
+            if calendar_ids is not None and calendar_id not in calendar_ids:
+                continue
             for event in events:
                 start_dt = _event_instant(event)
                 if start_dt is None or not _as_utc(time_min) <= start_dt < _as_utc(time_max):

@@ -20,6 +20,15 @@ _CALENDAR_PROPS = {
     "recurrence_scope": {"type": "string", "enum": ["instance", "series"]},
     "with_meet": {"type": "boolean"},
     "op_id": {"type": "string", "description": "From confirmation_required only"},
+    "reminder_minutes": {
+        "type": "integer",
+        "description": "Phone reminder this many minutes before the event (60 = an hour, 1440 = a day, 0 = at the start)",
+    },
+    "calendar": {
+        "type": "string",
+        "description": "Which calendars to read: «all», «primary» (the personal one) or a calendar's name. "
+        "Only when the user said which; without it a listing may ask.",
+    },
 }
 
 _GMAIL_PROPS = {
@@ -49,7 +58,7 @@ LIVE_BACKEND_TOOLS: list[dict] = [
     _fn(
         "calendar_list_events",
         "List upcoming Google Calendar events (read-only).",
-        {"query": _CALENDAR_PROPS["query"], "date": _CALENDAR_PROPS["date"]},
+        {"query": _CALENDAR_PROPS["query"], "date": _CALENDAR_PROPS["date"], "calendar": _CALENDAR_PROPS["calendar"]},
     ),
     _fn(
         "calendar_search_events",
@@ -59,6 +68,7 @@ LIVE_BACKEND_TOOLS: list[dict] = [
             "title": _CALENDAR_PROPS["title"],
             "date": _CALENDAR_PROPS["date"],
             "time": _CALENDAR_PROPS["time"],
+            "calendar": _CALENDAR_PROPS["calendar"],
         },
     ),
     _fn(
@@ -73,11 +83,12 @@ LIVE_BACKEND_TOOLS: list[dict] = [
             "new_start": _CALENDAR_PROPS["new_start"],
             "with_meet": _CALENDAR_PROPS["with_meet"],
             "new_description": _CALENDAR_PROPS["new_description"],
+            "reminder_minutes": _CALENDAR_PROPS["reminder_minutes"],
         },
     ),
     _fn(
         "calendar_prepare_update",
-        "Prepare edit/reschedule. Returns confirmation_required + op_id.",
+        "Prepare edit/reschedule, or a reminder for an existing event. Returns confirmation_required + op_id.",
         {
             "title": _CALENDAR_PROPS["title"],
             "query": _CALENDAR_PROPS["query"],
@@ -93,6 +104,7 @@ LIVE_BACKEND_TOOLS: list[dict] = [
             "new_description": _CALENDAR_PROPS["new_description"],
             "duration_minutes": _CALENDAR_PROPS["duration_minutes"],
             "recurrence_scope": _CALENDAR_PROPS["recurrence_scope"],
+            "reminder_minutes": _CALENDAR_PROPS["reminder_minutes"],
             "action": {"type": "string", "enum": ["edit", "update", "reschedule"]},
         },
     ),

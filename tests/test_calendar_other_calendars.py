@@ -46,7 +46,7 @@ def _call(router, **args):
 
 def test_week_lists_every_calendar_and_names_the_other_one(setup):
     router, _cal = setup
-    result = _call(router, action="list", query="що в мене на цей тиждень")
+    result = _call(router, action="list", query="що в мене на цей тиждень", calendar="всі")
     events = result.data["events"]
     assert [e["event_id"] for e in events] == ["client", "bigdata", "ux"]
     assert events[0]["calendar_id"] == "primary" and "read_only" not in events[0]
@@ -63,13 +63,13 @@ def test_another_calendars_event_is_never_the_one_to_change(setup):
 
 def test_leftover_words_never_hide_the_week(setup):
     router, _cal = setup
-    result = _call(router, action="list", query="знаєш по календарю щось, що в мене на цей тиждень по планах")
+    result = _call(router, action="list", query="знаєш по календарю щось, що в мене на цей тиждень по планах", calendar="всі")
     assert {e["event_id"] for e in result.data["events"]} == {"client", "bigdata", "ux"}
 
 
 def test_a_name_that_matches_nothing_still_gets_the_period(setup):
     router, _cal = setup
-    result = _call(router, action="list", query="йога на цей тиждень")
+    result = _call(router, action="list", query="йога на цей тиждень", calendar="всі")
     assert result.message.startswith("Подій із назвою «йога» немає. ")
     assert len(result.data["events"]) == 3
 
@@ -103,7 +103,7 @@ def test_google_client_reads_only_calendars_switched_on():
         events=lambda: SimpleNamespace(list=events_list),
     )
     client = GoogleCalendarClient.__new__(GoogleCalendarClient)
-    client._service, client._calendar_id = service, "primary"
+    client._service, client._calendar_id, client._others = service, "primary", None
     client._read = lambda request: request
     found = client.list_all_events(NOW, NOW + timedelta(days=7))
     assert calls == ["primary", UNI]

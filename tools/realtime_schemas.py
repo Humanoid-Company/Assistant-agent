@@ -190,6 +190,14 @@ TOOLS: list[dict] = [
                 "with_meet": {"type": "boolean"},
                 "confirmation": {"type": "string", "enum": ["yes", "no"]},
                 "op_id": {"type": "string", "description": "op_id з confirmation_required."},
+                "reminder_minutes": {
+                    "type": "integer",
+                    "description": "Для create або edit — нагадування на телефон за стільки хвилин до події.",
+                },
+                "calendar": {
+                    "type": "string",
+                    "description": "Для list/search — які календарі: «all», «primary» (особистий) або назва календаря.",
+                },
             },
             "required": ["action"],
         },

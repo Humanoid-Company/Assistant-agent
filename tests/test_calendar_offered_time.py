@@ -96,7 +96,7 @@ def test_spoken_minutes_and_half_hours(said, times):
 
 
 def test_a_listing_says_when_events_end(router):
-    result = router.calendar_action(**calendar_tool_args({"action": "list", "date": DAY}, session_id="s"))
+    result = router.calendar_action(**calendar_tool_args({"action": "list", "date": DAY, "calendar": "all"}, session_id="s"))
     assert "о 18:30 до 19:50 — Консультація" in result.message
 
 
