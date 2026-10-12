@@ -92,6 +92,7 @@ def test_live_prompt_v3_adds_person_to_v2():
     v2 = build_live_prompt(**common)
     v3 = build_live_prompt(variant="v3", **common)
     assert "Being a person" not in v2 and "Being a person" in v3
+    assert "end most replies with one short, specific question" in v3  # keeps the conversation going
     assert "you are talking, not reading" in v3  # v2's sound
 
 
