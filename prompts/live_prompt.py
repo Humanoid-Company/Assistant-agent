@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from voice.options import REALTIME_PERSONAS, VOICE_PERSONAS
+from voice.options import VOICE_PERSONAS
 
 _LIVE_PROMPT_STYLE: str = (
     "Role: You are Єва, a personal voice assistant that helps with Google Calendar, Gmail, notes "
@@ -375,89 +375,8 @@ PROMPT_VARIANTS: tuple[str, ...] = ("v1", "v2", "v3")
 
 
 def _person(variant: str) -> str:
-    """v3's «being a person» block — what she says, so it goes with any delivery (ElevenLabs too)."""
+    """v3's «being a person» block — what she says, so it goes with any delivery."""
     return _LIVE_PROMPT_PERSON if variant == "v3" else ""
-
-# ElevenLabs test engine: Realtime answers in text and ElevenLabs speaks it. The sound is the TTS
-# voice's job; the text has to be easy to say, and it is the only thing that shapes intonation.
-_ELEVEN_PROMPT_DELIVERY: str = (
-    "How you write — every word you output is spoken aloud by a text-to-speech voice:\n"
-    "- Plain spoken Ukrainian only: no markdown, lists, emoji, brackets, stage directions or the "
-    "names of sounds («сміється», «пауза», «вдих»).\n"
-    "- Write all numbers, dates, times, amounts and phone numbers in words, the way people say "
-    "them: «о пів на третю», «о шістнадцятій», «двадцять п'ятого жовтня», «сто двадцять гривень» — "
-    "never digits, «16:00» or «25.10».\n"
-    "- Short spoken sentences, varied in length; the first sentence especially short — it is "
-    "played while the rest is still being voiced. Every sentence ends with punctuation.\n"
-    "- Punctuation is your intonation: a comma for a small pause, a dash before the key part "
-    "(«Завтра — о третій»), «…» for a thoughtful pause, «?» and «!» where meant.\n"
-    "- Talk the way people talk, not the way they write: spoken word order, light interjections "
-    "(«ну», «о», «ого», «хм») sparingly, never the same opening twice in a row. No stock phrases "
-    "(«Звісно! Ось…», «Чудове питання!»).\n"
-    "- Brief by default (one to three sentences); longer only when asked. Never read URLs or IDs.\n"
-    "\n"
-)
-
-# The Realtime engine: no built-in delegation, so the Google work goes through one tool that runs
-# the same Responses backend as Live (server/realtime_engine.py).
-_REALTIME_NOTE: str = (
-    "\nThis app runs you on the Realtime engine. Calendar, Gmail, notes and the Google account: "
-    "call backend_task with the user's request in full — their own words plus the details from the "
-    "conversation (which event, which email, names, dates) and, for a yes/no you asked, their "
-    "answer. It does the work and tells you what to say; before calling it say one very short "
-    "acknowledgement («Зараз гляну.»). Never invent its results. Web search: call web_search "
-    "yourself. Wherever this prompt says «delegate to the backend», that is what it means. The "
-    "voice and its settings are chosen on the page in this mode: if asked to change the voice, "
-    "speed or manner, say briefly that it is in the settings on the page (this overrides the "
-    "voice-change rules above).\n"
-)
-_TEXT_OUTPUT_NOTE: str = "Your replies are text that ElevenLabs voices: write them for speech, as above.\n"
-
-
-def build_realtime_prompt(
-    *,
-    language_name: str,
-    assistant_name: str | None,
-    today: str,
-    voice: str | None = None,
-    feminine: bool = True,
-    text_output: bool = False,
-    delivery: str = "",
-    variant: str = "v2",
-    history: str = "",
-) -> str:
-    """Instructions for the Realtime engine: its own voice (an OpenAI preset) or text for ElevenLabs.
-    No listening backchannels (Realtime answers after the turn). history: the conversation so far —
-    in the instructions, so a greeting sent right after the call opens already knows it."""
-    if text_output:
-        style = _ELEVEN_PROMPT_DELIVERY
-    else:
-        style = _LIVE_PROMPT_DELIVERY if variant == "v1" else _LIVE_PROMPT_DELIVERY_V2
-    persona = None if text_output else REALTIME_PERSONAS.get(voice or "")
-    if persona:
-        who = persona.instructions()
-    elif feminine:
-        who = "You are a woman: speak about yourself in the feminine («я зрозуміла», «я записала»)."
-    else:
-        who = "You are a man: speak about yourself in the masculine («я зрозумів», «я записав»)."
-    prompt = (
-        _LIVE_PROMPT_STYLE + _person(variant) + style + who + "\n\n" + _LIVE_PROMPT_HEAD + _LIVE_PROMPT_TAIL
-        + _REALTIME_NOTE
-    )
-    if text_output:
-        prompt += _TEXT_OUTPUT_NOTE
-    prompt += f" Today is {today}. Speak exclusively in {language_name}."
-    if delivery:
-        prompt += f" {delivery}"
-    if assistant_name and assistant_name != "Єва":
-        prompt += f" Your name is {assistant_name}. Introduce yourself with that name."
-    if history:
-        prompt += (
-            "\n\nThe conversation so far (from earlier calls; you remember it — never repeat or retell "
-            "your past replies unless asked):\n" + history
-        )
-    return prompt
-
 
 def build_live_prompt(
     *,

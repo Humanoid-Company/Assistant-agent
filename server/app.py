@@ -24,7 +24,7 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
@@ -32,8 +32,6 @@ from auth.google_oauth import GoogleOAuthClient
 from auth.token_store import InMemoryTokenStore
 from auth.web_oauth import WebOAuth
 from config import (
-    ELEVENLABS_MODEL,
-    ELEVENLABS_VOICE_ID,
     GOOGLE_CALENDAR_TIMEZONE,
     GOOGLE_OAUTH_CLIENT_SECRETS_FILE,
     OPENAI_API_KEY,
@@ -44,18 +42,14 @@ from config import (
     OPENAI_LIVE_VOICE,
 )
 from prompts.backend_prompt import build_backend_prompt, local_today
-from prompts.live_prompt import GOOGLE_SIGNIN_HELP, PROMPT_VARIANTS, build_live_prompt, build_realtime_prompt
-from server.eleven import ELEVEN_MODELS, ElevenLabs, ElevenLabsError, TtsRequest
+from prompts.live_prompt import GOOGLE_SIGNIN_HELP, PROMPT_VARIANTS, build_live_prompt
 from server.live_bridge import SidebandToolBridge
-from server.realtime_engine import Brain, RealtimeBridge, history_text, realtime_session
 from server.web_users import WebUser, WebUserRegistry
 from tools.live_schemas import LIVE_BACKEND_TOOLS
 from voice.background import wake_commentary
 from voice.delegation import responses_delegation
 from voice.options import (
     LANGUAGE_OPTIONS,
-    REALTIME_DEFAULT_VOICE,
-    REALTIME_PERSONAS,
     SPEED_OPTIONS,
     STYLE_OPTIONS,
     VOICE_PERSONAS,
@@ -117,7 +111,6 @@ app.add_middleware(
 )
 
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-eleven = ElevenLabs()
 users = WebUserRegistry(client_secrets_file=GOOGLE_OAUTH_CLIENT_SECRETS_FILE, timezone=GOOGLE_CALENDAR_TIMEZONE)
 web_oauth = WebOAuth(
     client_id=os.getenv("GOOGLE_OAUTH_WEB_CLIENT_ID", ""),
@@ -184,14 +177,8 @@ class SessionRequest(BaseModel):
     # A voice switch opens the new call beside the current one: the page closes the old call
     # itself once the new one has taken over (the old one goes on talking meanwhile).
     keep_old: bool = False
-    # Delivery prompt: v2 (default) or v1.
+    # Delivery prompt: v2 (default), v1 or v3.
     prompt: str | None = None
-    # Engine: "live" (GPT-Live) or "realtime". Realtime speaks with its own preset (tts "openai")
-    # or answers in text for the page to voice with ElevenLabs (tts "eleven"; feminine = the
-    # ElevenLabs voice's gender, for «я зрозуміла / зрозумів»).
-    engine: str = "live"
-    tts: str = "openai"
-    feminine: bool = True
 
 
 # A kept old call still open this long after its successor opened is closed anyway (page gone).
@@ -227,7 +214,6 @@ def public_config() -> dict:
     return {
         "access_code_required": bool(ACCESS_CODE),
         "google_login": web_oauth.configured,
-        "eleven": eleven.configured,  # Realtime can use ElevenLabs voices (ELEVENLABS_API_KEY is set)
     }
 
 
@@ -239,7 +225,7 @@ async def create_session(
 ) -> dict:
     """Browser SDP offer in → SDP answer out; tools run here over a sideband."""
     user = _user(x_client_id, x_access_code)
-    if body.engine != "realtime" and body.voice and body.voice.strip().lower() in VOICE_PERSONAS:
+    if body.voice and body.voice.strip().lower() in VOICE_PERSONAS:
         user.voice = body.voice.strip().lower()
     if body.speed in SPEED_OPTIONS:
         user.speed = body.speed
@@ -250,8 +236,6 @@ async def create_session(
     if body.user_text and body.user_text.strip():
         user.conversation.add("user", body.user_text.strip()[:500])
         user.conversation.end_turn()
-    if body.engine == "realtime":
-        return await _create_realtime(body, user)
     try:
         result = await openai_client.live.create(
             session=_session_config(user), transport={"type": "webrtc", "sdp": body.sdp}
@@ -291,129 +275,6 @@ async def create_session(
     return {"sdp": result.transport.sdp, "session_id": session_id}
 
 
-# ── ElevenLabs voice for the Realtime engine ──────────────────────────────────
-
-
-def _need_eleven() -> None:
-    if not eleven.configured:
-        raise HTTPException(status_code=503, detail="eleven_not_configured")
-
-
-@app.get("/api/eleven/voices")
-async def eleven_voices(
-    x_client_id: str | None = Header(default=None),
-    x_access_code: str | None = Header(default=None),
-) -> dict:
-    _user(x_client_id, x_access_code)
-    _need_eleven()
-    try:
-        voices = await eleven.voices()
-    except httpx.HTTPError as exc:
-        logger.exception("eleven.voices_failed")
-        raise HTTPException(status_code=502, detail="eleven_voices_failed") from exc
-    default = ELEVENLABS_VOICE_ID or (voices[0]["id"] if voices else "")
-    return {"voices": voices, "default": default, "models": ELEVEN_MODELS, "default_model": ELEVENLABS_MODEL}
-
-
-@app.post("/api/eleven/tts")
-async def eleven_tts(
-    body: TtsRequest,
-    x_client_id: str | None = Header(default=None),
-    x_access_code: str | None = Header(default=None),
-) -> StreamingResponse:
-    """One or two sentences → MP3, streamed as ElevenLabs makes it."""
-    _user(x_client_id, x_access_code)
-    _need_eleven()
-    if not body.text.strip() or not body.voice_id:
-        raise HTTPException(status_code=400, detail="empty_text")
-    try:
-        audio = await eleven.tts(body)
-    except ElevenLabsError as exc:
-        logger.warning("eleven.tts_failed status=%s detail=%s", exc.status, exc.detail)
-        if "quota_exceeded" in exc.detail:
-            raise HTTPException(
-                status_code=402,
-                detail="закінчились кредити — або акаунта, або ліміт самого API-ключа (ElevenLabs → API Keys)",
-            ) from exc
-        raise HTTPException(status_code=502, detail=f"eleven_{exc.status}: {exc.detail}") from exc
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail="eleven_unreachable") from exc
-    return StreamingResponse(audio, media_type="audio/mpeg")
-
-
-async def _create_realtime(body: SessionRequest, user: WebUser) -> dict:
-    """The Realtime engine: a WebRTC call that speaks with its preset voice, or answers in text for
-    ElevenLabs; the sideband runs its tools, backend_task through the same backend as Live."""
-    language = LANGUAGE_OPTIONS.get(user.language, LANGUAGE_OPTIONS["uk"])
-    today = local_today()
-    eleven_voice = body.tts == "eleven"
-    if eleven_voice:
-        _need_eleven()
-    voice = None if eleven_voice else (body.voice if body.voice in REALTIME_PERSONAS else REALTIME_DEFAULT_VOICE)
-    # Speed is the session's own parameter here; the manner stays an instruction.
-    delivery = delivery_instruction("normal" if voice else user.speed, user.style)
-    instructions = build_realtime_prompt(
-        language_name=language,
-        assistant_name=user.assistant_name,
-        today=today,
-        voice=voice,
-        feminine=body.feminine if eleven_voice else REALTIME_PERSONAS[voice].feminine,
-        text_output=eleven_voice,
-        delivery=delivery,
-        variant=user.prompt_variant,
-        history=history_text(user.conversation),
-    ) + _WEB_NOTE
-    try:
-        result = await openai_client.realtime.calls.create(
-            sdp=body.sdp,
-            session=realtime_session(instructions=instructions, language=user.language, voice=voice, speed=user.speed),
-        )
-    except Exception as exc:
-        logger.exception("realtime.session.create_failed")
-        raise HTTPException(status_code=502, detail=f"realtime_create_failed: {type(exc).__name__}") from exc
-    # The call id is only in the Location header: /v1/realtime/calls/{call_id}
-    call_id = (result.response.headers.get("location") or "").rstrip("/").rsplit("/", 1)[-1]
-    if not call_id:
-        raise HTTPException(status_code=502, detail="realtime_no_call_id")
-    old_bridges = list(user.bridges)
-    if not body.keep_old:
-        for old in old_bridges:
-            try:
-                await old.close()
-            except Exception:
-                logger.debug("closing old session failed", exc_info=True)
-    brain = Brain(
-        client=openai_client,
-        executor=user.executor,
-        model=OPENAI_LIVE_BACKEND_MODEL,
-        instructions=build_backend_prompt(today=today, language_name=language),
-        state=user.brain_state,
-        conversation=user.conversation,
-        effort=OPENAI_LIVE_BACKEND_EFFORT,
-        parallel_tools=OPENAI_LIVE_PARALLEL_TOOLS,
-    )
-    bridge = RealtimeBridge(
-        client=openai_client,
-        call_id=call_id,
-        executor=user.executor,
-        brain=brain,
-        conversation=user.conversation,
-        on_closed=user.bridges.discard,
-        max_duration_s=MAX_SESSION_S,
-    )
-    user.bridges.add(bridge)
-    task = asyncio.create_task(bridge.run())
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
-    if body.keep_old:
-        for old in old_bridges:
-            closer = asyncio.create_task(_close_if_replaced(old, bridge, KEEP_OLD_MAX_S))
-            _background_tasks.add(closer)
-            closer.add_done_callback(_background_tasks.discard)
-    logger.info("realtime.session.created call_id=%s voice=%s keep_old=%s", call_id, voice or "eleven", body.keep_old)
-    return {"sdp": result.text, "session_id": call_id}
-
-
 @app.get("/api/me")
 def me(
     x_client_id: str | None = Header(default=None),
@@ -442,16 +303,13 @@ def me(
 
 
 @app.get("/api/voices")
-def voices(engine: str = Query(default="live")) -> dict:
-    """Voices for the page's picker (GPT-Live's, or Realtime's own presets); the chosen one applies
-    from the next call. ElevenLabs voices come from /api/eleven/voices."""
-    realtime = engine == "realtime"
-    personas = REALTIME_PERSONAS if realtime else VOICE_PERSONAS
+def voices() -> dict:
+    """Voices for the page's picker; the chosen one applies from the next call."""
     return {
-        "default": REALTIME_DEFAULT_VOICE if realtime else OPENAI_LIVE_VOICE,
+        "default": OPENAI_LIVE_VOICE,
         "voices": [
             {"id": p.voice, "label": p.label, "description": p.description, "feminine": p.feminine}
-            for p in personas.values()
+            for p in VOICE_PERSONAS.values()
         ],
     }
 
@@ -552,7 +410,6 @@ def clear_conversation(
     user = _user(x_client_id, x_access_code)
     user.conversation.clear()
     user.background.clear()
-    user.brain_state.clear()  # the Realtime backend's thread remembers the old chat too
     return {"ok": True}
 
 
@@ -564,7 +421,6 @@ def google_disconnect(
     user = _user(x_client_id, x_access_code)
     user.conversation.clear()  # the next person must not inherit this conversation
     user.background.clear()
-    user.brain_state.clear()
     return {"message": user.router.disconnect_google().message}
 
 

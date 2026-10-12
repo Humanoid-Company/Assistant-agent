@@ -25,7 +25,5 @@ services:
         sync: false
       - key: WEB_SEARCH_API_KEY
         sync: false
-      - key: ELEVENLABS_API_KEY # ElevenLabs voice for the Realtime engine; empty = off
-        sync: false
       - key: GOOGLE_CALENDAR_TIMEZONE
         value: Europe/Kyiv

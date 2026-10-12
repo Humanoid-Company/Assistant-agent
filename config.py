@@ -38,9 +38,6 @@ REALTIME_VOICE: str = "marin"
 # Pause (ms) that ends a user turn. Every ms here is added to each reply's latency;
 # lower = snappier, but too low cuts people off mid-thought.
 REALTIME_SILENCE_MS: int = int(os.getenv("REALTIME_SILENCE_MS", "600"))
-# Web page's Realtime engine: "semantic" — a model judges that the user has finished (like Live,
-# no cut-off at a pause mid-thought); "server" — plain silence of REALTIME_SILENCE_MS.
-REALTIME_TURN_DETECTION: str = os.getenv("REALTIME_TURN_DETECTION", "semantic").strip().lower()
 STT_REALTIME_MODEL: str = "gpt-4o-mini-transcribe"
 STT_REALTIME_LANGUAGE: str = "uk"
 
@@ -54,16 +51,9 @@ OPENAI_LIVE_PARALLEL_TOOLS: bool = os.getenv("OPENAI_LIVE_PARALLEL_TOOLS", "true
 # Reasoning effort of the backend model (minimal|low|medium|high). Empty = model default.
 # Lower = shorter pause before tool calls; check quality on real requests before keeping it.
 OPENAI_LIVE_BACKEND_EFFORT: str = os.getenv("OPENAI_LIVE_BACKEND_EFFORT", "").strip().lower()
-# Gleam: the team's pick by ear on Ukrainian samples (marin stays the Realtime default).
+# Gleam: the team's pick by ear on Ukrainian samples (marin stays the legacy desktop Realtime default).
 OPENAI_LIVE_VOICE: str = os.getenv("OPENAI_LIVE_VOICE", "gleam")
 OPENAI_LIVE_AUDIO_RATE: int = int(os.getenv("OPENAI_LIVE_AUDIO_RATE", "24000"))
-
-# ── ElevenLabs voice for the Realtime engine (web page) ───────────────────────
-# «Голос від: ElevenLabs»: Realtime answers in text, ElevenLabs speaks it. Off without a key.
-ELEVENLABS_API_KEY: str = os.getenv("ELEVENLABS_API_KEY", "").strip()
-# Voice used until the page picks one; empty = the first voice of the account's library.
-ELEVENLABS_VOICE_ID: str = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
-ELEVENLABS_MODEL: str = os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5").strip()
 
 # ── Live voice UX: local barge-in + busy cues ─────────────────────────────────
 # Local WebRTC VAD stops assistant playback before transcripts arrive.
