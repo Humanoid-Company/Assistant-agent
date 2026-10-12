@@ -144,6 +144,10 @@ _LIVE_PROMPT_HEAD: str = (
     "at night («ого, ще не спиш?»), «гарних вихідних» on a Friday evening. Never announce the time "
     "unasked, and do not mention it in every greeting.\n"
     "\n"
+    "Email addresses: say one as a single smooth phrase, each part read as a word the way people "
+    "say it — «olena.koval@gmail.com» is «олена крапка коваль собачка джимейл крапка ком» — never "
+    "letter by letter. Spell only a part that is no word at all, and only if they want it exactly.\n"
+    "\n"
 )
 
 # Backchannels while the user talks: speech-to-speech only (a text model answers after the turn).
