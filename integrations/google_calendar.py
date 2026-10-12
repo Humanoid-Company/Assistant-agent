@@ -19,10 +19,15 @@ _LIST_FIELDS = (
     "items(id,etag,status,summary,description,start,end,recurringEventId,recurrence,"
     "hangoutLink,htmlLink)"
 )
+# Calendars the user has switched on in Google Calendar (a university timetable, a shared one…).
+# A free/busy-only calendar has no titles to read.
+_CALENDAR_LIST_FIELDS = "items(id,summary,summaryOverride,primary,selected,hidden,accessRole)"
+_READABLE_ROLES = frozenset({"owner", "writer", "reader"})
 
 
 class CalendarClient(Protocol):
     def list_events(self, time_min: datetime, time_max: datetime, query: str | None = None) -> list[dict]: ...
+    def list_all_events(self, time_min: datetime, time_max: datetime, query: str | None = None) -> list[dict]: ...
     def create_event(self, body: dict, *, conference: bool = False) -> dict: ...
     def update_event(self, event_id: str, body: dict, calendar_id: str | None = None) -> dict: ...
     def delete_event(self, event_id: str, calendar_id: str | None = None) -> None: ...
@@ -42,8 +47,44 @@ class GoogleCalendarClient:
         return google_execute(request, self._credentials, read_only=False)
 
     def list_events(self, time_min: datetime, time_max: datetime, query: str | None = None) -> list[dict]:
+        return self._list(self._calendar_id, time_min, time_max, query)
+
+    def list_all_events(self, time_min: datetime, time_max: datetime, query: str | None = None) -> list[dict]:
+        """The primary calendar plus every other one switched on in Google Calendar — for reading
+        only: an event from another calendar carries _calendar_id and _calendar_name. A calendar
+        that fails to load is skipped, never the whole answer."""
+        items = self.list_events(time_min, time_max, query)
+        for calendar in self._other_calendars():
+            try:
+                found = self._list(calendar["id"], time_min, time_max, query)
+            except GoogleApiError:
+                logger.warning("calendar.list_other failed calendar=%s", calendar.get("summary"), exc_info=True)
+                continue
+            name = calendar.get("summaryOverride") or calendar.get("summary") or ""
+            items.extend({**event, "_calendar_id": calendar["id"], "_calendar_name": name} for event in found)
+        items.sort(key=_sort_key)
+        return items
+
+    def _other_calendars(self) -> list[dict]:
+        try:
+            response = self._read(
+                self._service.calendarList().list(fields=_CALENDAR_LIST_FIELDS, maxResults=250)
+            )
+        except GoogleApiError:
+            logger.warning("calendar.calendar_list failed", exc_info=True)
+            return []
+        return [
+            item
+            for item in response.get("items", [])
+            if not item.get("primary")
+            and item.get("selected")
+            and not item.get("hidden")
+            and item.get("accessRole") in _READABLE_ROLES
+        ]
+
+    def _list(self, calendar_id: str, time_min: datetime, time_max: datetime, query: str | None) -> list[dict]:
         kwargs: dict[str, Any] = {
-            "calendarId": self._calendar_id,
+            "calendarId": calendar_id,
             "timeMin": time_min.isoformat(),
             "timeMax": time_max.isoformat(),
             "singleEvents": True,
@@ -106,6 +147,8 @@ class FakeCalendarClient:
 
     def __init__(self) -> None:
         self.events: dict[str, dict] = {}
+        # Other calendars switched on in Google Calendar: (calendar id, name, events).
+        self.other_calendars: list[tuple[str, str, list[dict]]] = []
         self.fail_with: Exception | None = None
         self.fail_on: dict[str, Exception] = {}
         self.raise_after_create: Exception | None = None
@@ -139,7 +182,20 @@ class FakeCalendarClient:
             if query and not _query_matches(query, event):
                 continue
             items.append(event)
-        items.sort(key=lambda event: _event_instant(event) or datetime.min.replace(tzinfo=ZoneInfo("UTC")))
+        items.sort(key=_sort_key)
+        return items
+
+    def list_all_events(self, time_min: datetime, time_max: datetime, query: str | None = None) -> list[dict]:
+        items = self.list_events(time_min, time_max, query)
+        for calendar_id, name, events in self.other_calendars:
+            for event in events:
+                start_dt = _event_instant(event)
+                if start_dt is None or not _as_utc(time_min) <= start_dt < _as_utc(time_max):
+                    continue
+                if query and not _query_matches(query, event):
+                    continue
+                items.append({**event, "_calendar_id": calendar_id, "_calendar_name": name})
+        items.sort(key=_sort_key)
         return items
 
     def create_event(self, body: dict, *, conference: bool = False) -> dict:
@@ -492,6 +548,10 @@ def _event_instant(event: dict) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=ZoneInfo("Europe/Kyiv"))
     return parsed.astimezone(ZoneInfo("UTC"))
+
+
+def _sort_key(event: dict) -> datetime:
+    return _event_instant(event) or datetime.min.replace(tzinfo=ZoneInfo("UTC"))
 
 
 def _query_matches(query: str, event: dict) -> bool:

@@ -535,7 +535,10 @@ class CalendarEditMixin:
         future_only: bool,
         horizon_days: int,
         window: tuple[datetime, datetime] | None = None,
+        all_calendars: bool = False,
     ) -> list[dict]:
+        """all_calendars: read the other calendars too (listing and search only — changes stay in
+        the primary one)."""
         zone = ZoneInfo(self._timezone)
         if window:
             time_min, time_max = window
@@ -549,7 +552,8 @@ class CalendarEditMixin:
         else:
             time_min = now.replace(hour=0, minute=0, second=0, microsecond=0)
             time_max = now + timedelta(days=horizon_days)
-        events = client.list_events(time_min, time_max, query=title or None)
+        lister = client.list_all_events if all_calendars else client.list_events
+        events = lister(time_min, time_max, query=title or None)
         if title:
             tokens = [part.casefold() for part in title.split() if len(part) > 1]
             events = [

@@ -51,6 +51,11 @@ from integrations.google_errors import GoogleApiError
 
 logger = logging.getLogger(__name__)
 
+# A listing names this many events and counts the rest; the backend model gets more of them as data
+# (a university week is thirty classes).
+_SPOKEN_EVENTS = 8
+_PUBLIC_EVENTS = 20
+
 
 class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMixin):
     def __init__(
@@ -355,6 +360,9 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
         return (sub, session_id or "")
 
     def _remember(self, sub: str, session_id: str | None, event: dict) -> None:
+        if event.get("_calendar_id"):  # another calendar: read only, nothing to change later
+            self._forget(sub, session_id)
+            return
         self._selected[self._sel_key(sub, session_id)] = {
             "event_id": event.get("id"),
             "calendar_id": _PRIMARY,
@@ -410,16 +418,24 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
         now = self._now()
         title, parsed_date, parsed_time, window = self._read_query(query, now)
         day = self._day_of(date, now) or parsed_date
-        events = self._collect(
-            client,
-            title=title,
+        span = dict(
             date=day,
             time=parsed_time,
             now=now,
             future_only=day is None,
             horizon_days=days,
             window=None if day else window,
+            all_calendars=True,
         )
+        events = self._collect(client, title=title, **span)
+        if title and not events and (day or window):
+            # «що в мене на цей тиждень по планах»: a leftover word is no event name — a question
+            # about a period gets the period, not «нічого немає».
+            everything = self._collect(client, title="", **span)
+            if everything:
+                result = self._events_result(sub, session_id, everything, search_mode=False)
+                result.message = f"Подій із назвою «{title}» немає. " + result.message
+                return result
         return self._events_result(sub, session_id, events, search_mode=bool(title))
 
     def search(
@@ -445,6 +461,7 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
             future_only=False,
             horizon_days=30,
             window=None if day else window,
+            all_calendars=True,
         )
         return self._events_result(sub, session_id, events, search_mode=True)
 
@@ -461,7 +478,7 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
             message = "Не знайшов такої події в календарі." if search_mode else "На найближчі дні подій не знайдено."
             status = "not_found" if search_mode else "success"
             return AgentResult(status, message, {"events": []})
-        public = [self._public_event(event) for event in events[:8]]
+        public = [self._public_event(event) for event in events[:_PUBLIC_EVENTS]]
         if len(events) == 1:
             self._remember(sub, session_id, events[0])
             line = self._spoken_line(events[0])
@@ -478,7 +495,9 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
                 {"events": public, "selected_event_id": events[0].get("id")},
             )
         self._forget(sub, session_id)
-        lines = [self._spoken_line(event) for event in events[:5]]
+        lines = [self._spoken_line(event) for event in events[:_SPOKEN_EVENTS]]
+        if len(events) > len(lines):
+            lines.append(f"і ще {len(events) - len(lines)} (усього {len(events)})")
         if search_mode:
             message = (
                 "Знайшов кілька подій: " + "; ".join(lines) + ". Уточни назву, дату й час. "
@@ -560,7 +579,8 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
         timezone = (event.get("start") or {}).get("timeZone") or self._timezone
         return {
             "event_id": event.get("id"),
-            "calendar_id": _PRIMARY,
+            "calendar_id": event.get("_calendar_id") or _PRIMARY,
+            **({"calendar": event["_calendar_name"], "read_only": True} if event.get("_calendar_id") else {}),
             "summary": event.get("summary") or "(без назви)",
             "start": start,
             "end": end,
@@ -576,5 +596,8 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
             if "T" in str(start)
             else speak_date(str(start), now=self._now())
         )
-        return f"{when} — {event.get('summary') or '(без назви)'}"
+        line = f"{when} — {event.get('summary') or '(без назви)'}"
+        if event.get("_calendar_name"):
+            line += f" (календар «{event['_calendar_name']}»)"
+        return line
 
