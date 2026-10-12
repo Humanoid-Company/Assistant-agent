@@ -1,6 +1,8 @@
 """Short conversation prompt for gpt-live-1 (voice layer only)."""
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from voice.options import REALTIME_PERSONAS, VOICE_PERSONAS
 
 _LIVE_PROMPT_STYLE: str = (
@@ -163,9 +165,10 @@ _LIVE_PROMPT_LISTENING: str = (
 _LIVE_PROMPT_TAIL: str = (
     "Before a task that takes a moment (calendar, mail, notes, web search) say a very short "
     "acknowledgement yourself — «Так», «Зараз гляну», «Секунду», «Угу, дивлюсь» — vary it and "
-    "say only one. Do not narrate internal tool use. Only before such a task: in ordinary talk "
-    "you answer at once — no «зараз прикину», «дай подумати», «секунду, подумаю» before your own "
-    "answer.\n"
+    "say only one. If it runs long you may get a note that it is still running: then one short "
+    "line that you are on it, never a result. Do not narrate internal tool use. Only before such a "
+    "task: in ordinary talk you answer at once — no «зараз прикину», «дай подумати», «секунду, "
+    "подумаю» before your own answer.\n"
     "\n"
     "Hearing: the user speaks Ukrainian, sometimes mixed with Russian words or surzhyk — "
     "understand it as Ukrainian. If you did not catch what they said, or it makes no sense in "
@@ -244,6 +247,39 @@ GOOGLE_SIGNIN_HELP: str = (
     "«Підключити Google»); a stuck attempt expires by itself in about ten minutes.\n"
     "- Never ask for or accept a Google password by voice."
 )
+
+_WORK_KINDS: tuple[tuple[str, str], ...] = (
+    ("web_search", "the web search"),
+    ("calendar_", "the calendar lookup"),
+    ("gmail_", "the mail lookup"),
+    ("notes_", "the notes lookup"),
+)
+
+
+def work_progress_note(tools: Sequence[str], *, again: bool = False) -> str:
+    """Delegated work keeps her silent for seconds (server/live_bridge.py); a person looking something
+    up says so now and then, and silence on a call sounds like the line dropped."""
+    what = next(
+        (label for name in reversed(tools) for prefix, label in _WORK_KINDS if name.startswith(prefix)),
+        "the task",
+    )
+    if again:
+        line = (
+            "it is taking longer than usual: say so once, lightly, in your own words («Щось довго "
+            "думає, ще трошки.», «Ох, не поспішає. Ще секунду.»)"
+        )
+    else:
+        line = (
+            "fill the silence the way a person does while looking something up: one very short line in "
+            "your own words («Так, щось уже знаходжу…», «Ага, дивлюсь…», «Ще секундочку, гортаю…»), not "
+            "what you said before"
+        )
+    return (
+        f"Note, not a message from the user: {what} is still running, no result yet. If nobody is "
+        f"talking, {line}. Never give or guess a result, ask nothing and don't start it again — then "
+        "go quiet and wait for the result."
+    )
+
 
 # Experiment (?prompt=v2 on the page): v1's «calm, unhurried, legato, medium-low, settle downward»
 # reads like an audiobook narrator and pulls against «lively»; IPA most likely means nothing to a

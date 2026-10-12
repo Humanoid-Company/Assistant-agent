@@ -135,6 +135,11 @@ class DelegatedResponseTracker:
         state = self._states.get(key)
         return state is not None and not state.outstanding and not state.continued and bool(state.calls)
 
+    def had_calls(self, key: str) -> bool:
+        """The response called tools, so more work follows; none → it was the final answer."""
+        state = self._states.get(key)
+        return state is not None and bool(state.calls)
+
     def mark_continued(self, key: str) -> None:
         state = self._states.get(key)
         if state is not None:

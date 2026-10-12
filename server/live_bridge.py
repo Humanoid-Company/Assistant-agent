@@ -16,6 +16,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
+from prompts.live_prompt import work_progress_note
 from tools.executor import ToolExecutionContext, ToolExecutor
 from voice.conversation import ConversationLog, remember_tool_result
 from voice.delegation import RESPONSE_FINISHED_TYPES, DelegatedResponseTracker, extract_completed_function_call
@@ -30,6 +31,13 @@ _UTTERANCE_PAUSE_S = 0.9
 # The page acts on the same request first (/api/voice-request) and swaps calls without a gap; this
 # path only catches what it missed (an old cached page), so it waits that much longer.
 _PAGE_FIRST_S = 1.5
+# Delegated work (search, calendar, mail) runs while she is silent: this long after it started she
+# says she is on it (a second, «taking long», line later), once both she and the user have been
+# quiet for _PROGRESS_QUIET_S — the transcript runs ahead of her audio. Past _PROGRESS_GIVE_UP_S
+# she says nothing more.
+_PROGRESS_AFTER_S = (4.0, 11.0)
+_PROGRESS_QUIET_S = 2.5
+_PROGRESS_GIVE_UP_S = 30.0
 
 
 def _attr(obj: Any, name: str) -> Any:
@@ -73,7 +81,12 @@ class SidebandToolBridge:
         # instructions.append lands mid-answer as an interruption (it is how a barge-in stops her),
         # so setting changes wait until she has finished speaking.
         self._last_output_at = 0.0
+        self._last_input_at = 0.0
         self._pending_instruction: asyncio.Task | None = None
+        # Delegated work in progress: key → the tools it has called so far, and the task that says
+        # «шукаю…» while it runs.
+        self._work: dict[str, list[str]] = {}
+        self._progress: dict[str, asyncio.Task] = {}
 
     async def run(self) -> None:
         expiry: asyncio.Task | None = None
@@ -94,7 +107,7 @@ class SidebandToolBridge:
             self._connection = None
             if expiry is not None:
                 expiry.cancel()
-            for task in list(self._tool_tasks):
+            for task in [*self._tool_tasks, *self._progress.values()]:
                 task.cancel()
             logger.info("web.sideband.closed session_id=%s", self.session_id)
             if self._on_closed:
@@ -171,6 +184,7 @@ class SidebandToolBridge:
         if etype == "session.input_transcript.delta":
             delta = _attr(event, "delta") or ""
             self._input_buf += delta
+            self._last_input_at = asyncio.get_running_loop().time()
             if self._conversation is not None:
                 self._conversation.add("user", delta)
             if self._on_voice_request is not None and VOICE_REQUEST_RE.search(self._input_buf):
@@ -202,9 +216,13 @@ class SidebandToolBridge:
         key = str(_attr(event, "delegation_id") or _attr(response, "id") or _attr(inner, "response_id") or "")
         if itype == "response.created":
             self._responses.response_started(key)
+            self._work_started(key)
             return
         if itype in RESPONSE_FINISHED_TYPES:
-            if self._responses.response_finished(key, ok=itype == "response.completed"):
+            ok = itype == "response.completed"
+            if not ok or not self._responses.had_calls(key):
+                self._work.pop(key, None)  # the final answer (or a failure): she speaks now
+            if self._responses.response_finished(key, ok=ok):
                 await self._continue(key, reason="response_finished")
             return
         if itype != "response.output_item.done":
@@ -213,6 +231,8 @@ class SidebandToolBridge:
         if completed is None:
             return
         self._responses.call_started(key, completed.call_id)
+        if key in self._work:
+            self._work[key].append(completed.name)
         logger.info(
             "web.tool.call session_id=%s call_id=%s tool_name=%s",
             self.session_id,
@@ -231,6 +251,35 @@ class SidebandToolBridge:
         )
         self._tool_tasks.add(task)
         task.add_done_callback(self._tool_tasks.discard)
+
+    def _work_started(self, key: str) -> None:
+        """A delegated response started; a continuation after tool results is the same work."""
+        if key in self._work:
+            return
+        self._work[key] = []
+        task = asyncio.create_task(self._say_progress(key))
+        self._progress[key] = task
+        task.add_done_callback(lambda _: self._progress.pop(key, None))
+
+    async def _say_progress(self, key: str) -> None:
+        """The work keeps her silent: now and then she says she is on it, like a person looking
+        something up — silence on a call sounds like the line dropped."""
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        for n, after in enumerate(_PROGRESS_AFTER_S):
+            while True:
+                await asyncio.sleep(0.25)
+                now = loop.time()
+                if not self.is_open or key not in self._work or now - started > _PROGRESS_GIVE_UP_S:
+                    return
+                quiet = now - max(self._last_output_at, self._last_input_at)
+                if now - started >= after and quiet >= _PROGRESS_QUIET_S:
+                    break
+            logger.info(
+                "web.work.progress session_id=%s n=%s after_s=%.1f tools=%s",
+                self.session_id, n + 1, loop.time() - started, self._work[key],
+            )
+            await self.say(work_progress_note(self._work[key], again=n > 0))
 
     async def _execute_and_continue(
         self,
