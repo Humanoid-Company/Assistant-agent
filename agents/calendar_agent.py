@@ -598,6 +598,9 @@ class CalendarAgent(CalendarCreateMixin, CalendarEditMixin, CalendarExecutionMix
             if "T" in str(start)
             else speak_date(str(start), now=self._now())
         )
+        bounds = _timed_bounds(event)
+        if bounds:  # without the end she guessed it («до сімнадцятої п'ятдесят» for 19:50)
+            when += f" до {bounds[1].astimezone(ZoneInfo(self._timezone)):%H:%M}"
         line = f"{when} — {event.get('summary') or '(без назви)'}"
         if event.get("_calendar_name"):
             line += f" (календар «{event['_calendar_name']}»)"
