@@ -4,12 +4,11 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from datetime import date
 
 from config import (
     OPENAI_LIVE_VOICE,
 )
-from prompts.backend_prompt import build_backend_prompt
+from prompts.backend_prompt import build_backend_prompt, local_today
 from prompts.live_prompt import GOOGLE_SIGNIN_HELP, build_live_prompt
 from tools.executor import ToolExecutionContext
 from tools.results import ToolResult, agent_result_to_tool_result
@@ -90,7 +89,7 @@ class LiveDriverMixin:
                 build_live_prompt(
                     language_name=LANGUAGE_OPTIONS.get(self._memory.get("language", "uk"), LANGUAGE_OPTIONS["uk"]),
                     assistant_name=self._memory.get("assistant_name"),
-                    today=date.today().isoformat(),
+                    today=local_today(),
                     voice=voice,
                     delivery=delivery_instruction(
                         self._memory.get("speed", "normal"), self._memory.get("style", "normal")
@@ -98,7 +97,7 @@ class LiveDriverMixin:
                 ),
                 mic_read_chunk=mic.read_chunk,
                 backend_instructions=build_backend_prompt(
-                    today=date.today().isoformat(),
+                    today=local_today(),
                     language_name=LANGUAGE_OPTIONS.get(self._memory.get("language", "uk"), LANGUAGE_OPTIONS["uk"]),
                 ),
             )

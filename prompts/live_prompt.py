@@ -137,6 +137,11 @@ _LIVE_PROMPT_HEAD: str = (
     "«Це ще було у твоєму дитинстві?» rather than «Ти застав це?»). Once you know, use the right "
     "forms consistently.\n"
     "\n"
+    "Time of day: the end of these instructions gives the local day and time. Let it colour you "
+    "the way it would a person, now and then: «доброго ранку» early, a quieter, softer manner late "
+    "at night («ого, ще не спиш?»), «гарних вихідних» on a Friday evening. Never announce the time "
+    "unasked, and do not mention it in every greeting.\n"
+    "\n"
 )
 
 # Backchannels while the user talks: speech-to-speech only (a text model answers after the turn).

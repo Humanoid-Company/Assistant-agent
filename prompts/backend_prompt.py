@@ -1,6 +1,9 @@
 """Detailed backend prompt for Responses delegation (calendar + Gmail + notes)."""
 from __future__ import annotations
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from config import GOOGLE_CALENDAR_TIMEZONE
 
 BACKEND_PROMPT: str = (
@@ -106,6 +109,14 @@ BACKEND_PROMPT: str = (
     "ERRORS: On error/not_found/ambiguous/stale — surface the tool message; never "
     "fabricate success. Ambiguous matches require clarification, not a guess.\n"
 )
+
+
+def local_today() -> str:
+    """Date, weekday and time in the user's timezone, for «Today is …» in the prompts. The server
+    runs in UTC: date.today() there was yesterday's date until 02:00–03:00 Kyiv time, and without
+    the time of day she could not tell morning from late night."""
+    now = datetime.now(ZoneInfo(GOOGLE_CALENDAR_TIMEZONE))
+    return f"{now:%A}, {now:%Y-%m-%d}, local time {now:%H:%M} ({GOOGLE_CALENDAR_TIMEZONE})"
 
 
 def build_backend_prompt(*, today: str, language_name: str) -> str:

@@ -19,7 +19,6 @@ import logging
 import os
 import re
 from contextlib import asynccontextmanager
-from datetime import date
 from typing import Any
 
 import httpx
@@ -44,7 +43,7 @@ from config import (
     OPENAI_LIVE_PARALLEL_TOOLS,
     OPENAI_LIVE_VOICE,
 )
-from prompts.backend_prompt import build_backend_prompt
+from prompts.backend_prompt import build_backend_prompt, local_today
 from prompts.live_prompt import GOOGLE_SIGNIN_HELP, PROMPT_VARIANTS, build_live_prompt, build_realtime_prompt
 from server.eleven import ELEVEN_MODELS, ElevenLabs, ElevenLabsError, TtsRequest
 from server.live_bridge import SidebandToolBridge
@@ -143,7 +142,7 @@ def _user_voice(user: WebUser) -> str:
 
 def _session_config(user: WebUser) -> dict:
     language = LANGUAGE_OPTIONS.get(user.language, LANGUAGE_OPTIONS["uk"])
-    today = date.today().isoformat()
+    today = local_today()
     voice = _user_voice(user)
     config = {
         "model": OPENAI_LIVE_MODEL,
@@ -346,7 +345,7 @@ async def _create_realtime(body: SessionRequest, user: WebUser) -> dict:
     """The Realtime engine: a WebRTC call that speaks with its preset voice, or answers in text for
     ElevenLabs; the sideband runs its tools, backend_task through the same backend as Live."""
     language = LANGUAGE_OPTIONS.get(user.language, LANGUAGE_OPTIONS["uk"])
-    today = date.today().isoformat()
+    today = local_today()
     eleven_voice = body.tts == "eleven"
     if eleven_voice:
         _need_eleven()
