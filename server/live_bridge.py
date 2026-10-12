@@ -32,12 +32,14 @@ _UTTERANCE_PAUSE_S = 0.9
 # path only catches what it missed (an old cached page), so it waits that much longer.
 _PAGE_FIRST_S = 1.5
 # Delegated work (search, calendar, mail) runs while she is silent: this long after it started she
-# says she is on it (a second, «taking long», line later), once both she and the user have been
-# quiet for _PROGRESS_QUIET_S — the transcript runs ahead of her audio. Past _PROGRESS_GIVE_UP_S
-# she says nothing more.
-_PROGRESS_AFTER_S = (4.0, 11.0)
+# says once that she is on it, when she has been quiet for _PROGRESS_QUIET_S — the transcript runs
+# ahead of her audio. Past _PROGRESS_GIVE_UP_S she says nothing. A second «taking long» line made
+# three fillers in a row with her own «Секунду».
+_PROGRESS_AFTER_S = 5.0
 _PROGRESS_QUIET_S = 2.5
-_PROGRESS_GIVE_UP_S = 30.0
+_PROGRESS_GIVE_UP_S = 20.0
+# The user's own request may still be transcribed this long after the work started.
+_PROGRESS_INPUT_GRACE_S = 1.5
 
 
 def _attr(obj: Any, name: str) -> Any:
@@ -87,6 +89,8 @@ class SidebandToolBridge:
         # «шукаю…» while it runs.
         self._work: dict[str, list[str]] = {}
         self._progress: dict[str, asyncio.Task] = {}
+        # Work whose results are in: the backend is writing the answer, she is about to speak it.
+        self._answering: set[str] = set()
 
     async def run(self) -> None:
         expiry: asyncio.Task | None = None
@@ -222,6 +226,7 @@ class SidebandToolBridge:
             ok = itype == "response.completed"
             if not ok or not self._responses.had_calls(key):
                 self._work.pop(key, None)  # the final answer (or a failure): she speaks now
+                self._answering.discard(key)
             if self._responses.response_finished(key, ok=ok):
                 await self._continue(key, reason="response_finished")
             return
@@ -233,6 +238,7 @@ class SidebandToolBridge:
         self._responses.call_started(key, completed.call_id)
         if key in self._work:
             self._work[key].append(completed.name)
+            self._answering.discard(key)  # one more step
         logger.info(
             "web.tool.call session_id=%s call_id=%s tool_name=%s",
             self.session_id,
@@ -262,24 +268,30 @@ class SidebandToolBridge:
         task.add_done_callback(lambda _: self._progress.pop(key, None))
 
     async def _say_progress(self, key: str) -> None:
-        """The work keeps her silent: now and then she says she is on it, like a person looking
-        something up — silence on a call sounds like the line dropped."""
+        """The work keeps her silent: once, she says she is on it, like a person looking something
+        up — silence on a call sounds like the line dropped. Not once the results are in (the line
+        landed after her answer: «…ніби дивишся Ага, тоді думаю далі») and not after the user spoke
+        again (a correction makes this work stale)."""
         loop = asyncio.get_running_loop()
         started = loop.time()
-        for n, after in enumerate(_PROGRESS_AFTER_S):
-            while True:
-                await asyncio.sleep(0.25)
-                now = loop.time()
-                if not self.is_open or key not in self._work or now - started > _PROGRESS_GIVE_UP_S:
-                    return
-                quiet = now - max(self._last_output_at, self._last_input_at)
-                if now - started >= after and quiet >= _PROGRESS_QUIET_S:
-                    break
-            logger.info(
-                "web.work.progress session_id=%s n=%s after_s=%.1f tools=%s",
-                self.session_id, n + 1, loop.time() - started, self._work[key],
-            )
-            await self.say(work_progress_note(self._work[key], again=n > 0))
+        while True:
+            await asyncio.sleep(0.25)
+            now = loop.time()
+            if (
+                not self.is_open
+                or key not in self._work
+                or key in self._answering
+                or self._last_input_at > started + _PROGRESS_INPUT_GRACE_S
+                or now - started > _PROGRESS_GIVE_UP_S
+            ):
+                return
+            if now - started >= _PROGRESS_AFTER_S and now - self._last_output_at >= _PROGRESS_QUIET_S:
+                break
+        logger.info(
+            "web.work.progress session_id=%s after_s=%.1f tools=%s",
+            self.session_id, loop.time() - started, self._work[key],
+        )
+        await self.say(work_progress_note(self._work[key]))
 
     async def _execute_and_continue(
         self,
@@ -338,6 +350,8 @@ class SidebandToolBridge:
     async def _continue(self, key: str, *, reason: str) -> None:
         """Every call of the delegated response has its result: let the model go on."""
         self._responses.mark_continued(key)
+        if key in self._work:
+            self._answering.add(key)
         if self.is_open:
             logger.info("web.response.continue session_id=%s reason=%s", self.session_id, reason)
             await self._connection.response.create(event_id=f"continue_{uuid.uuid4().hex[:8]}")

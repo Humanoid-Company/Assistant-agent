@@ -25,9 +25,10 @@ def _call(call_id: str) -> dict:
     })
 
 
-def _bridge(monkeypatch, *, after=(0.05, 0.15), quiet=0.0) -> tuple[SidebandToolBridge, SimpleNamespace]:
+def _bridge(monkeypatch, *, after=0.05, quiet=0.0) -> tuple[SidebandToolBridge, SimpleNamespace]:
     monkeypatch.setattr(live_bridge, "_PROGRESS_AFTER_S", after)
     monkeypatch.setattr(live_bridge, "_PROGRESS_QUIET_S", quiet)
+    monkeypatch.setattr(live_bridge, "_PROGRESS_INPUT_GRACE_S", 0.0)
     executor = ToolExecutor(calendar=CalendarToolWrappers(lambda **kw: AgentResult("success", "ok", {})))
     bridge = SidebandToolBridge(client=SimpleNamespace(), session_id="s1", executor=executor)
     conn = SimpleNamespace(
@@ -42,31 +43,44 @@ def _said(conn: SimpleNamespace) -> list[str]:
     return [c.kwargs["content"] for c in conn.session.commentary.append.await_args_list]
 
 
-def test_note_names_the_work_and_never_a_result():
-    first = work_progress_note(["web_search"])
-    assert "the web search is still running" in first and "Not a result" in first
-    assert "nobody is talking" not in first and "go quiet" not in first  # a choice → a literal «null»
-    assert "longer than usual" in work_progress_note(["calendar_list_events"], again=True)
-    assert "the task is still running" in work_progress_note([])
+def test_note_names_the_work_without_sample_lines():
+    note = work_progress_note(["web_search"])
+    assert "the web search for their last request is still running" in note and "Not a result" in note
+    assert "«" not in note  # sample lines were said word for word
+    assert "nobody is talking" not in note and "go quiet" not in note  # a choice → a literal «null»
+    assert "the task" in work_progress_note([])
 
 
-def test_long_work_gets_two_progress_lines(monkeypatch):
+def test_long_work_gets_one_progress_line(monkeypatch):
     bridge, conn = _bridge(monkeypatch)
 
     async def run():
         await bridge._handle_event(_event({"type": "response.created", "response": {"id": "r1"}}))
         await bridge._handle_event(_call("c1"))
-        await bridge._handle_event(_event({"type": "response.completed", "response": {"id": "r1"}}))
-        await asyncio.sleep(0.9)  # the continuation is still writing the answer (checks every 0.25 s)
+        await asyncio.sleep(0.6)  # the tool still runs (checks every 0.25 s)
         said = _said(conn)
-        assert len(said) == 2
-        assert "the calendar lookup" in said[0] and "longer than usual" in said[1]
+        assert len(said) == 1 and "the calendar lookup" in said[0]
+
+    asyncio.run(run())
+
+
+def test_no_progress_once_the_results_are_in(monkeypatch):
+    bridge, conn = _bridge(monkeypatch, after=0.3)
+
+    async def run():
+        await bridge._handle_event(_event({"type": "response.created", "response": {"id": "r1"}}))
+        await bridge._handle_event(_call("c1"))
+        await bridge._handle_event(_event({"type": "response.completed", "response": {"id": "r1"}}))
+        await asyncio.gather(*bridge._tool_tasks)  # results in → continued: the answer is being written
+        await bridge._handle_event(_event({"type": "response.created", "response": {"id": "r2"}}))
+        await asyncio.sleep(0.6)
+        assert _said(conn) == [] and "dlg-1" in bridge._answering
 
     asyncio.run(run())
 
 
 def test_final_answer_stops_progress(monkeypatch):
-    bridge, conn = _bridge(monkeypatch, after=(0.2, 0.4))
+    bridge, conn = _bridge(monkeypatch, after=0.2)
 
     async def run():
         await bridge._handle_event(_event({"type": "response.created", "response": {"id": "r1"}}))
@@ -77,11 +91,24 @@ def test_final_answer_stops_progress(monkeypatch):
     asyncio.run(run())
 
 
-def test_no_progress_line_while_someone_talks(monkeypatch):
+def test_no_progress_after_the_user_speaks_again(monkeypatch):
+    bridge, conn = _bridge(monkeypatch, after=0.3)
+
+    async def run():
+        await bridge._handle_event(_event({"type": "response.created", "response": {"id": "r1"}}))
+        await asyncio.sleep(0.05)
+        await bridge._handle_event({"type": "session.input_transcript.delta", "delta": "ні, я не про це"})
+        await asyncio.sleep(0.6)
+        assert _said(conn) == []
+
+    asyncio.run(run())
+
+
+def test_no_progress_while_she_talks(monkeypatch):
     bridge, conn = _bridge(monkeypatch, quiet=10.0)
 
     async def run():
-        await bridge._handle_event({"type": "session.input_transcript.delta", "delta": "а ще"})
+        await bridge._handle_event({"type": "session.output_transcript.delta", "delta": "Секунду."})
         await bridge._handle_event(_event({"type": "response.created", "response": {"id": "r1"}}))
         await asyncio.sleep(0.4)
         assert _said(conn) == []

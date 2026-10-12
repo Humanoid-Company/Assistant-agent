@@ -259,29 +259,22 @@ _WORK_KINDS: tuple[tuple[str, str], ...] = (
 )
 
 
-def work_progress_note(tools: Sequence[str], *, again: bool = False) -> str:
+def work_progress_note(tools: Sequence[str]) -> str:
     """Delegated work keeps her silent for seconds (server/live_bridge.py); a person looking something
-    up says so now and then, and silence on a call sounds like the line dropped."""
+    up says so, and silence on a call sounds like the line dropped. No sample lines: she said them
+    word for word («Ще секундочку, гортаю…») and every wait sounded the same."""
     what = next(
         (label for name in reversed(tools) for prefix, label in _WORK_KINDS if name.startswith(prefix)),
         "the task",
     )
-    if again:
-        line = (
-            "It is taking longer than usual: say so in one short, light line in your own words («Щось "
-            "довго думає, ще трошки.», «Ох, не поспішає. Ще секунду.»)."
-        )
-    else:
-        line = (
-            "Say one very short line in your own words that you are on it, the way a person looking "
-            "something up does («Так, щось уже знаходжу…», «Ага, дивлюсь…», «Ще секундочку, гортаю…») — "
-            "not what you said before."
-        )
     # No «if nobody is talking» / «then go quiet»: the bridge checks the quiet itself, and with a
     # choice GPT-Live sometimes picked silence and printed a literal «null» into the transcript.
     return (
-        f"Note, not a message from the user: {what} is still running, no result yet. {line} Not a "
-        "result or a guess at one, not a question, and don't start it again."
+        f"Note, not a message from the user: {what} for their last request is still running, no result "
+        "yet. Say one short line thinking aloud about what they asked, the way a person does while "
+        "looking it up — about this exact request, in your own words, not a stock filler and nothing "
+        "like your earlier lines. Not a result or a guess at one, not a question, and don't start it "
+        "again."
     )
 
 
